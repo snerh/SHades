@@ -12,7 +12,7 @@ end
 
 function save_plot_from_points(
     path::AbstractString,
-    points::Vector{Dict{Symbol,Any}};
+    points::Vector{ScanPoint};
     xaxis::Symbol=:wl,
     yaxis::Symbol=:sig,
     mode::Symbol=:line,

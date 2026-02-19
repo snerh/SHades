@@ -13,7 +13,7 @@ function consume_events!(events::Channel{MeasurementEvent}; on_step::Function=(:
         elseif ev isa LegacyScanStarted
             println("Legacy scan started")
         elseif ev isa LegacyScanStep
-            println("legacy-step=$(ev.index) file=$(ev.file_stem) sig=$(round(ev.params[:sig], digits=3))")
+            println("legacy-step=$(ev.index) file=$(ev.file_stem) sig=$(round(ev.point.sig, digits=3))")
         elseif ev isa LegacyScanFinished
             println("Legacy scan finished: $(ev.points) points")
         end

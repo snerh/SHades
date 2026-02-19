@@ -4,6 +4,7 @@ include("core/types.jl")
 include("core/scan_axes.jl")
 include("core/plan_builders.jl")
 include("core/axis_spec_parser.jl")
+include("core/time_utils.jl")
 include("model/interfaces.jl")
 include("model/state.jl")
 include("model/legacy_adapters.jl")
@@ -11,15 +12,18 @@ include("processing/dataset_io.jl")
 include("processing/presets.jl")
 include("processing/spectrum_io.jl")
 include("controller/events.jl")
+include("controller/common.jl")
 include("controller/measurement.jl")
 include("controller/focus.jl")
 include("controller/power_stabilization.jl")
 include("controller/app_controller.jl")
 include("controller/legacy_scan.jl")
 include("controller/state_updates.jl")
+include("application/legacy_app_usecases.jl")
 include("view/console_view.jl")
 
-export ScanParams, Spectrum
+export ScanParams, Spectrum, ScanPoint
+export scan_point_from_params, scan_point_axis, scan_point_to_dict
 export ScanAxis, IndependentAxis, FixedAxis, DependentAxis, MultiDependentAxis, LoopAxis, ScanPlan
 export axis_name, has_axis, legacy_axes_to_plan
 export parse_axis_spec, build_scan_plan_from_text_specs, validate_scan_plan, validate_scan_text_specs
@@ -35,7 +39,7 @@ export save_plot_from_points
 export MeasurementControl, AppState, MeasurementSession
 export MeasurementEvent, MeasurementStarted, StepResult, MeasurementFinished, MeasurementStopped, MeasurementError
 export LegacyScanStarted, LegacyScanStep, LegacyScanFinished
-export start_measurement, stop_measurement!, pause_measurement!, resume_measurement!
+export start_measurement, stop_measurement!, pause_measurement!, resume_measurement!, stop_and_wait!
 export start_focus_measurement, run_focus!
 export stabilize_power!
 export start_legacy_scan

@@ -1,34 +1,8 @@
 using Statistics
 
-function _scan_check_stop_or_pause!(ctrl::MeasurementControl)
-    ctrl.stop && return false
-    while ctrl.pause
-        ctrl.stop && return false
-        sleep(0.05)
-    end
-    return true
-end
-
-function _time_to_seconds_scan(v)
-    if v isa Number
-        return Float64(v)
-    end
-    if v isa Tuple && length(v) == 2 && v[1] isa Number && v[2] isa AbstractString
-        t0, unit = v
-        return Float64(t0) * (
-            unit == "ns" ? 1e-9 :
-            unit == "mks" ? 1e-6 :
-            unit == "ms" ? 1e-3 :
-            unit == "s" ? 1.0 :
-            unit == "min" ? 60.0 :
-            unit == "h" ? 3600.0 : 1.0)
-    end
-    return 0.1
-end
-
 function _acq_time_s(p::Dict{Symbol,Any})
     if haskey(p, :acq_time)
-        return _time_to_seconds_scan(p[:acq_time])
+        return time_to_seconds(p[:acq_time]; default=0.1)
     end
     return get(p, :time_s, 0.1)
 end
@@ -59,7 +33,7 @@ function _apply_new_params!(oldp::Dict{Symbol,Any}, newp::Dict{Symbol,Any}, devi
         elseif k == :sol_wl
             set_spectrometer_wavelength!(devices.spectrometer, Float64(v))
         elseif k == :acq_time
-            set_camera_acquisition!(devices.camera, _time_to_seconds_scan(v))
+            set_camera_acquisition!(devices.camera, time_to_seconds(v; default=0.1))
         elseif k == :slit
             set_spectrometer_slit!(devices.spectrometer, Float64(v))
         elseif k == :power
@@ -140,7 +114,6 @@ function _walk_axes!(axes::Vector{ScanAxis}, i::Int, body::Function, ctrl::Measu
 end
 
 function run_legacy_scan!(devices::DeviceBundle, plan::ScanPlan; ch::Channel{MeasurementEvent}, ctrl::MeasurementControl, delay_s::Float64=1.5, output_dir::Union{Nothing,String}=nothing)
-    acc = Dict{Symbol,Any}[]
     oldp = Dict{Symbol,Any}()
     back = nothing
     step_index = Ref(0)
@@ -153,7 +126,7 @@ function run_legacy_scan!(devices::DeviceBundle, plan::ScanPlan; ch::Channel{Mea
         end
 
         body = function (p::Dict{Symbol,Any}, fname::String)
-            _scan_check_stop_or_pause!(ctrl) || return :stop
+            _check_stop_or_pause!(ctrl) || return :stop
 
             _normalize_params!(p)
             oldp = _apply_new_params!(oldp, p, devices)
@@ -164,7 +137,7 @@ function run_legacy_scan!(devices::DeviceBundle, plan::ScanPlan; ch::Channel{Mea
             end
 
             delay_s > 0 && sleep(delay_s)
-            _scan_check_stop_or_pause!(ctrl) || return :stop
+            _check_stop_or_pause!(ctrl) || return :stop
 
             t_s = _acq_time_s(p)
             data = _acquire_with_back(devices, t_s, _frames(p), back)
@@ -175,10 +148,10 @@ function run_legacy_scan!(devices::DeviceBundle, plan::ScanPlan; ch::Channel{Mea
             point[:time_s] = t_s
             point[:real_power] = real_power
             point[:sig] = sig
-            push!(acc, point)
+            scan_point = scan_point_from_params(point)
 
             step_index[] += 1
-            put!(ch, LegacyScanStep(step_index[], fname, copy(point), copy(data), copy(acc)))
+            put!(ch, LegacyScanStep(step_index[], fname, scan_point, copy(data)))
 
             if output_dir !== nothing
                 mkpath(output_dir)
@@ -192,7 +165,7 @@ function run_legacy_scan!(devices::DeviceBundle, plan::ScanPlan; ch::Channel{Mea
         if res == :stop
             put!(ch, MeasurementStopped())
         else
-            put!(ch, LegacyScanFinished(length(acc)))
+            put!(ch, LegacyScanFinished(step_index[]))
         end
     catch ex
         put!(ch, MeasurementError(sprint(showerror, ex), ex))

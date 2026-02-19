@@ -1,0 +1,17 @@
+wl_spec = "500:2:540"
+stab_kp = 0.5
+pol_spec = "0"
+acq_ms = "50"
+ana_spec = "0"
+cam_temp = "0"
+plot_log = false
+stab_duration = 5.0
+inter = "SIG"
+plot_z = "sig"
+frames = "2"
+delay_s = "0.01"
+plot_mode = "line"
+power_spec = "100"
+plot_y = "sig"
+sol_spec = "=round(wl/40)*20"
+plot_x = "wl"

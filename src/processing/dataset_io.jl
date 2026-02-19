@@ -59,22 +59,6 @@ function _decode_header(s::AbstractString)
     return out
 end
 
-function _time_to_seconds(v)
-    if v isa Tuple && length(v) == 2 && v[1] isa Number && v[2] isa AbstractString
-        t0, unit = v
-        return Float64(t0) * (
-            unit == "ns" ? 1e-9 :
-            unit == "mks" ? 1e-6 :
-            unit == "ms" ? 1e-3 :
-            unit == "s" ? 1.0 :
-            unit == "min" ? 60.0 :
-            unit == "h" ? 3600.0 : 1.0)
-    elseif v isa Number
-        return Float64(v)
-    end
-    return 0.0
-end
-
 function read_dat_file(path::AbstractString)
     io = open(path, "r")
     try
@@ -86,9 +70,9 @@ function read_dat_file(path::AbstractString)
 
         if !haskey(params, :time_s)
             if haskey(params, :acq_time)
-                params[:time_s] = _time_to_seconds(params[:acq_time])
+                params[:time_s] = time_to_seconds(params[:acq_time]; default=0.0)
             elseif haskey(params, :time)
-                params[:time_s] = _time_to_seconds(params[:time])
+                params[:time_s] = time_to_seconds(params[:time]; default=0.0)
             end
         end
         if !haskey(params, :sig) && !isempty(data)

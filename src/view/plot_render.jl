@@ -1,22 +1,12 @@
 import Cairo
 import Printf
 
-function _dict_num(d::Dict{Symbol,Any}, k::Symbol, default::Float64=NaN)
-    v = get(d, k, default)
-    v isa Number && return Float64(v)
-    try
-        return parse(Float64, string(v))
-    catch
-        return default
-    end
-end
-
-function _axis_values(points::Vector{Dict{Symbol,Any}}, xaxis::Symbol, yaxis::Symbol)
+function _axis_values(points::Vector{ScanPoint}, xaxis::Symbol, yaxis::Symbol)
     xs = Float64[]
     ys = Float64[]
     for p in points
-        x = _dict_num(p, xaxis, NaN)
-        y = _dict_num(p, yaxis, NaN)
+        x = scan_point_axis(p, xaxis)
+        y = scan_point_axis(p, yaxis)
         if isfinite(x) && isfinite(y)
             push!(xs, x)
             push!(ys, y)
@@ -25,14 +15,14 @@ function _axis_values(points::Vector{Dict{Symbol,Any}}, xaxis::Symbol, yaxis::Sy
     return xs, ys
 end
 
-function _axis_triplet_values(points::Vector{Dict{Symbol,Any}}, xaxis::Symbol, yaxis::Symbol, zaxis::Symbol)
+function _axis_triplet_values(points::Vector{ScanPoint}, xaxis::Symbol, yaxis::Symbol, zaxis::Symbol)
     xs = Float64[]
     ys = Float64[]
     zs = Float64[]
     for p in points
-        x = _dict_num(p, xaxis, NaN)
-        y = _dict_num(p, yaxis, NaN)
-        z = _dict_num(p, zaxis, NaN)
+        x = scan_point_axis(p, xaxis)
+        y = scan_point_axis(p, yaxis)
+        z = scan_point_axis(p, zaxis)
         if isfinite(x) && isfinite(y) && isfinite(z)
             push!(xs, x)
             push!(ys, y)
@@ -191,6 +181,75 @@ function _draw_polyline!(ctx, xs::Vector{Float64}, ys::Vector{Float64}, w::Float
     Cairo.stroke(ctx)
 end
 
+function _draw_series_legend!(
+    ctx,
+    series::Vector{NamedTuple{(:label, :color),Tuple{String,NTuple{3,Float64}}}},
+    w::Float64,
+    h::Float64
+)
+    isempty(series) && return
+    Cairo.set_font_size(ctx, 10)
+    x0 = max(w - 230, 44)
+    y0 = 24.0
+    for (i, s) in enumerate(series)
+        y = y0 + (i - 1) * 14
+        Cairo.set_source_rgb(ctx, s.color...)
+        Cairo.set_line_width(ctx, 2.0)
+        Cairo.move_to(ctx, x0, y)
+        Cairo.line_to(ctx, x0 + 18, y)
+        Cairo.stroke(ctx)
+        Cairo.set_source_rgb(ctx, 0.12, 0.12, 0.12)
+        Cairo.move_to(ctx, x0 + 24, y + 3)
+        Cairo.show_text(ctx, s.label)
+    end
+    return nothing
+end
+
+function _draw_polyline_series!(
+    ctx,
+    series::Vector{NamedTuple{(:label, :xs, :ys, :color),Tuple{String,Vector{Float64},Vector{Float64},NTuple{3,Float64}}}},
+    w::Float64,
+    h::Float64;
+    title::String=""
+)
+    _draw_axes!(ctx, w, h; title=title)
+    isempty(series) && return
+
+    allx = Float64[]
+    ally = Float64[]
+    for s in series
+        append!(allx, s.xs)
+        append!(ally, s.ys)
+    end
+    length(allx) < 2 && return
+
+    xmin, xmax = _nice_limits(allx)
+    ymin, ymax = _nice_limits(ally)
+    _draw_cartesian_ticks!(ctx, w, h, xmin, xmax, ymin, ymax)
+
+    left, top = 40.0, 15.0
+    pw = max(w - 55, 1)
+    ph = max(h - 40, 1)
+    tx(x) = left + (x - xmin) / max(xmax - xmin, 1e-12) * pw
+    ty(y) = top + ph - (y - ymin) / max(ymax - ymin, 1e-12) * ph
+
+    legend_items = NamedTuple{(:label, :color),Tuple{String,NTuple{3,Float64}}}[]
+    for s in series
+        length(s.xs) < 2 && continue
+        Cairo.set_source_rgb(ctx, s.color...)
+        Cairo.set_line_width(ctx, 1.7)
+        Cairo.move_to(ctx, tx(s.xs[1]), ty(s.ys[1]))
+        for i in 2:length(s.xs)
+            Cairo.line_to(ctx, tx(s.xs[i]), ty(s.ys[i]))
+        end
+        Cairo.stroke(ctx)
+        push!(legend_items, (label=s.label, color=s.color))
+    end
+
+    _draw_series_legend!(ctx, legend_items, w, h)
+    return nothing
+end
+
 function _heat_color(t::Float64)
     u = clamp(t, 0.0, 1.0)
     if u < 0.33
@@ -342,13 +401,14 @@ function render_signal_plot!(
     ctx,
     w::Float64,
     h::Float64,
-    points::Vector{Dict{Symbol,Any}};
+    points::Vector{ScanPoint};
     xaxis::Symbol,
     yaxis::Symbol,
     mode::Symbol=:line,
     zaxis::Symbol=:sig,
     log_scale::Bool=false,
-    title::String=""
+    title::String="",
+    overlays::Vector{NamedTuple{(:label, :points, :color),Tuple{String,Vector{ScanPoint},NTuple{3,Float64}}}}=NamedTuple{(:label, :points, :color),Tuple{String,Vector{ScanPoint},NTuple{3,Float64}}}[]
 )
     if mode == :heatmap
         xs, ys, zs = _axis_triplet_values(points, xaxis, yaxis, zaxis)
@@ -373,8 +433,18 @@ function render_signal_plot!(
         keep = [isfinite(xs[i]) && isfinite(ydraw[i]) for i in eachindex(xs)]
         x2 = xs[keep]
         y2 = ydraw[keep]
+        series = NamedTuple{(:label, :xs, :ys, :color),Tuple{String,Vector{Float64},Vector{Float64},NTuple{3,Float64}}}[]
+        push!(series, (label="Current", xs=x2, ys=y2, color=(0.03, 0.38, 0.62)))
+        for ov in overlays
+            ox, oy = _axis_values(ov.points, xaxis, yaxis)
+            odraw = _maybe_log10(oy; enabled=log_scale)
+            keep_ov = [isfinite(ox[i]) && isfinite(odraw[i]) for i in eachindex(ox)]
+            ox2 = ox[keep_ov]
+            oy2 = odraw[keep_ov]
+            push!(series, (label=ov.label, xs=ox2, ys=oy2, color=ov.color))
+        end
         ytag = log_scale ? "log10($(yaxis))" : string(yaxis)
-        _draw_polyline!(ctx, x2, y2, w, h; color=(0.03, 0.38, 0.62), title=isempty(title) ? "signal: $(xaxis) vs $(ytag)" : title)
+        _draw_polyline_series!(ctx, series, w, h; title=isempty(title) ? "signal: $(xaxis) vs $(ytag)" : title)
     end
     return nothing
 end

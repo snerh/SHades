@@ -1,14 +1,5 @@
 using Statistics
 
-@inline function _check_stop_or_pause!(ctrl::MeasurementControl)
-    ctrl.stop && return false
-    while ctrl.pause
-        ctrl.stop && return false
-        sleep(0.05)
-    end
-    return true
-end
-
 @inline function _choose_sol_wavelength(params::ScanParams, wl::Float64)
     if params.fixed_sol_wavelength !== nothing
         return params.fixed_sol_wavelength

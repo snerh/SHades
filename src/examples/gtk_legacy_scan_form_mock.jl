@@ -161,8 +161,12 @@ css_provider_ref = Ref{Any}(install_error_css!(win))
 
 Gtk.signal_connect(run_btn, "clicked") do _
     if session_ref[] !== nothing
-        stop_measurement!(session_ref[])
+        ok = stop_and_wait!(session_ref[]; timeout_s=5.0)
         session_ref[] = nothing
+        if !ok
+            Gtk.set_gtk_property!(status, :label, "Failed to stop previous session")
+            return
+        end
     end
 
     try
@@ -204,7 +208,7 @@ Gtk.signal_connect(run_btn, "clicked") do _
             on_started = _ -> Gtk.set_gtk_property!(status, :label, "Started"),
             on_step = ev -> begin
                 if ev isa LegacyScanStep
-                    Gtk.set_gtk_property!(status, :label, "step=$(ev.index), sig=$(round(ev.params[:sig], digits=3)), file=$(ev.file_stem)")
+                    Gtk.set_gtk_property!(status, :label, "step=$(ev.index), sig=$(round(ev.point.sig, digits=3)), file=$(ev.file_stem)")
                 end
             end,
             on_finished = ev -> begin
@@ -228,7 +232,8 @@ end
 
 Gtk.signal_connect(win, "destroy") do _
     if session_ref[] !== nothing
-        stop_measurement!(session_ref[])
+        stop_and_wait!(session_ref[]; timeout_s=2.0)
+        session_ref[] = nothing
     end
 end
 

@@ -31,9 +31,8 @@ end
 struct LegacyScanStep <: MeasurementEvent
     index::Int
     file_stem::String
-    params::Dict{Symbol,Any}
+    point::ScanPoint
     raw::Vector{Float64}
-    accumulated::Vector{Dict{Symbol,Any}}
 end
 
 struct LegacyScanFinished <: MeasurementEvent
