@@ -21,6 +21,8 @@ set_shutter!(::AbstractSpectrometer, ::Bool) = error("set_shutter! is not implem
 set_polarizer!(::AbstractEllipsometer, ::Float64) = error("set_polarizer! is not implemented")
 set_analyzer!(::AbstractEllipsometer, ::Float64) = error("set_analyzer! is not implemented")
 set_camera_acquisition!(::AbstractCamera, ::Float64) = error("set_camera_acquisition! is not implemented")
+set_camera_temperature!(::AbstractCamera, ::Union{Nothing,Float64}) = nothing
+read_camera_temperature(::AbstractCamera) = NaN
 acquire_spectrum(::AbstractCamera; frames::Int=1) = error("acquire_spectrum is not implemented")
 read_lockin_power(::AbstractLockin) = error("read_lockin_power is not implemented")
 set_target_power!(::AbstractLockin, ::Union{Nothing,Float64}) = nothing

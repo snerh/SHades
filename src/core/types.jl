@@ -11,6 +11,7 @@ Base.@kwdef struct ScanParams
     polarizer_deg::Float64 = 0.0
     analyzer_deg::Float64 = 0.0
     target_power::Union{Nothing,Float64} = nothing
+    camera_temp_c::Union{Nothing,Float64} = nothing
 end
 
 struct Spectrum

@@ -122,3 +122,13 @@ function save_dat_file(path::AbstractString, params::Dict{Symbol,Any}, data::Abs
     end
     return path
 end
+
+function save_raw_spectrum(path::AbstractString, raw::AbstractVector{<:Real}; params::Dict{Symbol,Any}=Dict{Symbol,Any}())
+    params = copy(params)
+    params[:raw] = true
+    return save_dat_file(path, params, raw)
+end
+
+function load_raw_spectrum(path::AbstractString)
+    return read_dat_file(path)
+end

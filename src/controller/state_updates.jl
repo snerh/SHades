@@ -7,9 +7,11 @@ function apply_event!(state::AppState, ev::MeasurementEvent)
     elseif ev isa LegacyScanStep
         state.points = copy(ev.accumulated)
         state.last_raw = copy(ev.raw)
+        _maybe_update_spectrum_from_points!(state)
         state.status = "Step $(ev.index)"
     elseif ev isa LegacyScanFinished
         state.running = false
+        _maybe_update_spectrum_from_points!(state)
         state.status = "Finished: $(ev.points) points"
     elseif ev isa MeasurementStarted
         state.running = true
@@ -28,6 +30,27 @@ function apply_event!(state::AppState, ev::MeasurementEvent)
     elseif ev isa MeasurementError
         state.running = false
         state.status = "Error: $(ev.message)"
+    end
+    return state
+end
+
+function _maybe_update_spectrum_from_points!(state::AppState)
+    xs = Float64[]
+    ys = Float64[]
+    for p in state.points
+        x = get(p, :wl, NaN)
+        y = get(p, :sig, NaN)
+        x isa Number || continue
+        y isa Number || continue
+        xf = Float64(x)
+        yf = Float64(y)
+        if isfinite(xf) && isfinite(yf)
+            push!(xs, xf)
+            push!(ys, yf)
+        end
+    end
+    if !isempty(xs)
+        state.spectrum = Spectrum(xs, ys)
     end
     return state
 end

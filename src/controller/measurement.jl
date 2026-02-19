@@ -29,6 +29,7 @@ function run_measurement!(devices::DeviceBundle, params::ScanParams, ch::Channel
         put!(ch, MeasurementStarted(params))
 
         set_camera_acquisition!(devices.camera, params.acq_time_s)
+        set_camera_temperature!(devices.camera, params.camera_temp_c)
         set_target_power!(devices.lockin, params.target_power)
         set_polarizer!(devices.ellipsometer, params.polarizer_deg)
         set_analyzer!(devices.ellipsometer, params.analyzer_deg)
