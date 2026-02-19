@@ -132,7 +132,7 @@ function _parse_numeric_axis(name::Symbol, spec::AbstractString)
     return nothing
 end
 
-function parse_axis_spec(name::Symbol, raw_spec::AbstractString)
+function parse_axis_spec(name::Symbol, raw_spec::AbstractString; numeric_only::Bool=false)
     spec = strip(raw_spec)
     isempty(spec) && return nothing
 
@@ -162,6 +162,10 @@ function parse_axis_spec(name::Symbol, raw_spec::AbstractString)
     axis = _parse_numeric_axis(name, spec)
     axis !== nothing && return axis
 
+    if numeric_only
+        error("Axis '$name' expects numeric value/range/list, or dependent expression starting with '='")
+    end
+
     # Safe string literal mode for categorical fixed params.
     if startswith(spec, "\"") && endswith(spec, "\"")
         return FixedAxis(name, spec[2:end-1])
@@ -169,14 +173,77 @@ function parse_axis_spec(name::Symbol, raw_spec::AbstractString)
     return FixedAxis(name, spec)
 end
 
-function build_scan_plan_from_text_specs(specs::Vector{Pair{Symbol,String}}; fixed::AbstractVector{<:Pair}=Pair{Symbol,Any}[])
+function build_scan_plan_from_text_specs(
+    specs::Vector{Pair{Symbol,String}};
+    fixed::AbstractVector{<:Pair}=Pair{Symbol,Any}[],
+    numeric_axes::AbstractSet{Symbol}=Set{Symbol}(),
+)
     axes = ScanAxis[]
     for (name, spec) in specs
-        ax = parse_axis_spec(name, spec)
+        ax = parse_axis_spec(name, spec; numeric_only=(name in numeric_axes))
         ax === nothing || push!(axes, ax)
     end
     for (name, val) in fixed
         push!(axes, FixedAxis(name, val))
     end
     return ScanPlan(axes)
+end
+
+function validate_scan_plan(plan::ScanPlan)
+    errors = Dict{Symbol,String}()
+    seen = Set{Symbol}()
+
+    for ax in plan.axes
+        name = axis_name(ax)
+        if name in seen
+            errors[name] = "Axis '$name' is defined more than once"
+            continue
+        end
+
+        if ax isa DependentAxis
+            if !(ax.depends_on in seen)
+                errors[name] = "Axis '$name' depends on '$(ax.depends_on)', but it is missing or defined later"
+            end
+        elseif ax isa MultiDependentAxis
+            missing = [d for d in ax.depends_on if !(d in seen)]
+            if !isempty(missing)
+                errors[name] = "Axis '$name' has missing/late dependencies: $(join(string.(missing), ", "))"
+            end
+        end
+
+        push!(seen, name)
+    end
+
+    return errors
+end
+
+function validate_scan_text_specs(
+    specs::Vector{Pair{Symbol,String}};
+    fixed::AbstractVector{<:Pair}=Pair{Symbol,Any}[],
+    numeric_axes::AbstractSet{Symbol}=Set{Symbol}(),
+)
+    errors = Dict{Symbol,String}()
+    axes = ScanAxis[]
+
+    for (name, spec) in specs
+        try
+            ax = parse_axis_spec(name, spec; numeric_only=(name in numeric_axes))
+            ax === nothing || push!(axes, ax)
+        catch e
+            errors[name] = sprint(showerror, e)
+        end
+    end
+
+    for (name, val) in fixed
+        push!(axes, FixedAxis(name, val))
+    end
+
+    plan = ScanPlan(axes)
+    merge!(errors, validate_scan_plan(plan))
+
+    return (
+        ok = isempty(errors),
+        plan = isempty(errors) ? plan : nothing,
+        errors = errors,
+    )
 end

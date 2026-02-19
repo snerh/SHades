@@ -45,7 +45,7 @@ fields = [
     ("acq time (ms)", acq_ms),
     ("frames", frames),
     ("delay (s)", delay_s),
-    ("output dir", out_dir),
+    #("output dir", out_dir),
 ]
 
 for (i, (lbl, w)) in enumerate(fields)
@@ -64,6 +64,44 @@ push!(root, btns)
 push!(root, status)
 push!(win, root)
 
+const CSS_PRIORITY_APPLICATION = 800
+
+function install_error_css!(win)
+    css = """
+    entry.axis-error,
+    entry.axis-error:focus {
+        background-image: none;
+        box-shadow: none;
+        background-color: #ffe4e6;
+        color: #7f1d1d;
+        border-color: #dc2626;
+    }
+    entry.axis-error selection {
+        background-color: #fecaca;
+        color: #7f1d1d;
+    }
+    """
+    provider = Gtk.CssProviderLeaf(data=css)
+    screen = Gtk.GAccessor.screen(win)
+    ccall((:gtk_style_context_add_provider_for_screen, Gtk.libgtk), Nothing,
+          (Ptr{Nothing}, Ptr{Gtk.GObject}, Cuint),
+          screen, provider, CSS_PRIORITY_APPLICATION)
+    return provider
+end
+
+function set_error_style!(entry, on::Bool)
+    ctx = Gtk.GAccessor.style_context(entry)
+    if on
+        ccall((:gtk_style_context_add_class, Gtk.libgtk), Nothing,
+              (Ptr{Nothing}, Cstring), ctx.handle, "axis-error")
+    else
+        ccall((:gtk_style_context_remove_class, Gtk.libgtk), Nothing,
+              (Ptr{Nothing}, Cstring), ctx.handle, "axis-error")
+    end
+    ccall((:gtk_widget_queue_draw, Gtk.libgtk), Nothing, (Ptr{Gtk.GObject},), entry.handle)
+    return nothing
+end
+
 function parse_int_default(s, d)
     try
         parse(Int, strip(s))
@@ -80,6 +118,47 @@ function parse_float_default(s, d)
     end
 end
 
+spec_order = [
+    :wl => wl_spec,
+    :sol_wl => sol_spec,
+    :polarizer => pol_spec,
+    :analyzer => ana_spec,
+    :power => power_spec,
+]
+spec_entries = Dict{Symbol,Any}(spec_order)
+
+function clear_validation_marks!()
+    for entry in values(spec_entries)
+        set_error_style!(entry, false)
+        Gtk.set_gtk_property!(entry, :tooltip_text, "")
+        try
+            Gtk.set_gtk_property!(entry, :secondary_icon_name, "")
+            Gtk.set_gtk_property!(entry, :secondary_icon_tooltip_text, "")
+        catch
+        end
+    end
+end
+
+function apply_validation_marks!(errs::Dict{Symbol,String})
+    clear_validation_marks!()
+    for (k, msg) in errs
+        if haskey(spec_entries, k)
+            entry = spec_entries[k]
+            set_error_style!(entry, true)
+            Gtk.set_gtk_property!(entry, :tooltip_text, msg)
+            try
+                Gtk.set_gtk_property!(entry, :secondary_icon_name, "dialog-error-symbolic")
+                Gtk.set_gtk_property!(entry, :secondary_icon_tooltip_text, msg)
+                Gtk.set_gtk_property!(entry, :secondary_icon_activatable, false)
+                Gtk.set_gtk_property!(entry, :secondary_icon_sensitive, true)
+            catch
+            end
+        end
+    end
+end
+
+css_provider_ref = Ref{Any}(install_error_css!(win))
+
 Gtk.signal_connect(run_btn, "clicked") do _
     if session_ref[] !== nothing
         stop_measurement!(session_ref[])
@@ -88,13 +167,7 @@ Gtk.signal_connect(run_btn, "clicked") do _
 
     try
         specs = Pair{Symbol,String}[]
-        for (sym, entry) in [
-            :wl => wl_spec,
-            :sol_wl => sol_spec,
-            :polarizer => pol_spec,
-            :analyzer => ana_spec,
-            :power => power_spec,
-        ]
+        for (sym, entry) in spec_order
             txt = strip(Gtk.get_gtk_property(entry, "text", String))
             isempty(txt) || push!(specs, sym => txt)
         end
@@ -110,7 +183,16 @@ Gtk.signal_connect(run_btn, "clicked") do _
             :frames => fr,
         ]
 
-        plan = build_scan_plan_from_text_specs(specs; fixed=fixed)
+        numeric_axes = Set([:wl, :sol_wl, :polarizer, :analyzer, :power])
+        vr = validate_scan_text_specs(specs; fixed=fixed, numeric_axes=numeric_axes)
+        if !vr.ok
+            apply_validation_marks!(vr.errors)
+            msg = join(["$k: $v" for (k, v) in sort(collect(vr.errors); by=first)], " | ")
+            Gtk.set_gtk_property!(status, :label, "Validation error: $msg")
+            return
+        end
+        clear_validation_marks!()
+        plan = vr.plan
 
         out = strip(Gtk.get_gtk_property(out_dir, "text", String))
         out_path = isempty(out) ? nothing : out
