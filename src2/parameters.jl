@@ -1,3 +1,8 @@
+module Parameters
+
+export ScanAxis, FixedAxis, IndependentAxis, DependentAxis, MultiDependentAxis, LoopAxis, 
+       ScanAxisSet, expand, axis_name, has_axis
+
 abstract type ScanAxis end
 
 struct IndependentAxis{T} <: ScanAxis
@@ -33,20 +38,20 @@ end
 
 LoopAxis(; name::Symbol=:loop, start::Int=1, step::Int=1, stop::Union{Nothing,Int}=nothing) = LoopAxis(name, start, step, stop)
 
-struct ScanPlan
+struct ScanAxisSet
     axes::Vector{ScanAxis}
 end
 
-ScanPlan(axes::ScanAxis...) = ScanPlan(collect(axes))
+ScanAxisSet(axes::ScanAxis...) = ScanAxisSet(collect(axes))
 
 axis_name(ax::ScanAxis) = ax.name
 
-function has_axis(plan::ScanPlan, name::Symbol)
+function has_axis(plan::ScanAxisSet, name::Symbol)
     any(ax -> axis_name(ax) == name, plan.axes)
 end
 
-function legacy_axes_to_plan(p_init)
-    axes = ScanAxis[]
+function axes_to_plan(p_init)
+    axes = ScanAxisSet[]
     for (k, v) in p_init
         if k == :loop
             push!(axes, LoopAxis(name=:loop, start=Int(v), step=1, stop=nothing))
@@ -58,5 +63,5 @@ function legacy_axes_to_plan(p_init)
             push!(axes, FixedAxis(k, v))
         end
     end
-    return ScanPlan(axes)
+    return ScanAxisSet(axes)
 end
