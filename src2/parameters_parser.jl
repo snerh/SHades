@@ -1,5 +1,9 @@
 module ParameterParser
 
+using ..Parameters
+
+export parse_axis_spec, build_scan_axis_set_from_text_specs, build_scan_plan_from_text_specs
+
 const _SAFE_CONSTS = Dict{Symbol,Float64}(
     :pi => π,
     :e => ℯ,
@@ -171,7 +175,7 @@ function parse_axis_spec(name::Symbol, raw_spec::AbstractString)
     return FixedAxis(name, spec)
 end
 
-function build_scan_plan_from_text_specs(specs::Vector{Pair{Symbol,String}}; fixed::AbstractVector{<:Pair}=Pair{Symbol,Any}[])
+function build_scan_axis_set_from_text_specs(specs::Vector{Pair{Symbol,String}}; fixed::AbstractVector{<:Pair}=Pair{Symbol,Any}[])
     axes = ScanAxis[]
     for (name, spec) in specs
         ax = parse_axis_spec(name, spec)
@@ -180,5 +184,10 @@ function build_scan_plan_from_text_specs(specs::Vector{Pair{Symbol,String}}; fix
     for (name, val) in fixed
         push!(axes, FixedAxis(name, val))
     end
-    return ScanPlan(axes)
+    return ScanAxisSet(axes)
+end
+
+build_scan_plan_from_text_specs(specs::Vector{Pair{Symbol,String}}; fixed::AbstractVector{<:Pair}=Pair{Symbol,Any}[]) =
+    build_scan_axis_set_from_text_specs(specs; fixed=fixed)
+
 end

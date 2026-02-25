@@ -9,8 +9,8 @@ function save_config(path, params::ScanAxisSet)
 
     dict = Dict{String,Any}()
 
-    for (k,v) in params.params
-        dict[string(k)] = spec_to_dict(v)
+    for (k,v) in axes_dict(params)
+        dict[string(k)] = axis_to_dict(v)
     end
 
     open(path, "w") do io
@@ -23,29 +23,29 @@ function load_config(path)
     specs = Dict{Symbol,ScanAxis}()
 
     for (k,tbl) in data["scan"]
-        specs[Symbol(k)] = load_spec(tbl)
+        specs[Symbol(k)] = load_spec(Symbol(k), tbl)
     end
 
-    return ParameterSet(specs)
+    return ScanAxisSet(collect(values(specs)))
 end
 
-function load_spec(tbl)
+function load_spec(name::Symbol, tbl)
     t = tbl["type"]
     if t == "fixed"
-        Fixed(tbl["value"])
-    elseif t == "linear"
-        LinearRange(tbl["start"], tbl["stop"], tbl["step"])
+        FixedAxis(name, tbl["value"])
     elseif t == "list"
-        ValueList(tbl["values"])
+        IndependentAxis(name, tbl["values"])
+    elseif t == "loop"
+        LoopAxis(name=name, start=tbl["start"], step=tbl["step"], stop=tbl["stop"])
     else
         error("Unknown spec")
     end
 end
 
-spec_to_dict(p::Fixed) = Dict("type"=>"fixed","value"=>p.value)
-spec_to_dict(p::LinearRange) =
-    Dict("type"=>"linear","start"=>p.start,"stop"=>p.stop,"step"=>p.step)
-spec_to_dict(p::ValueList) =
+axis_to_dict(p::FixedAxis) = Dict("type"=>"fixed","value"=>p.value)
+axis_to_dict(p::IndependentAxis) =
     Dict("type"=>"list","values"=>p.values)
+axis_to_dict(p::LoopAxis) =
+    Dict("type"=>"loop","start"=>p.start,"stop"=>p.stop,"step"=>p.step)
 
 end

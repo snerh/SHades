@@ -2,13 +2,13 @@ module Measurement
 
 using ..Domain
 using ..Parameters
-using ..Device
+using ..DeviceManager
 
 export MeasurementCommand, measurement_loop, MeasurementStep, MeasurementDone
 
 abstract type MeasurementCommand end
 struct StartMeasurement <: MeasurementCommand
-    params::ParameterSet
+    params::ScanAxisSet
 end
 struct StopMeasurement <: MeasurementCommand end
 
@@ -39,18 +39,18 @@ function measurement_loop(cmd_ch, event_ch, manager)
         if running && params !== nothing
             ## переписать!!!
 
-            wl_spec = params.params[:wavelength]
+            wl_spec = axes_dict(params)[:wavelength]
             wavelengths = expand(wl_spec)
 
             signal = Float64[]
 
             for λ in wavelengths
                 reply = Channel(1)
-                put!(device_cmd, SetParameter(:wavelength, λ, reply))
+                put!(manager.devices[:spec], SetParameter(:wavelength, λ, reply))
                 take!(reply)
 
                 reply2 = Channel(1)
-                put!(device_cmd, ReadSignal(reply2))
+                put!(manager.devices[:spec], ReadSignal(:signal, reply2))
                 val = take!(reply2)
 
                 push!(signal, val)

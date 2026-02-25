@@ -1,12 +1,14 @@
 module DeviceManager
 
+export DeviceManager, RawDevice, MockDevice
+export DeviceCommand, SetParameter, ReadSignal, ShutdownDevice
+export device_loop, SystemEvent, DeviceError
+
+abstract type DeviceCommand end
+
 struct DeviceManager
     devices::Dict{Symbol,Channel{DeviceCommand}}
 end
-
-export DeviceCommand, device_loop, SystemEvent, DeviceError
-
-abstract type DeviceCommand end
 
 struct SetParameter <: DeviceCommand
     name::Symbol
@@ -32,7 +34,7 @@ function device_loop(raw_dev)
     event_ch = raw_dev.device_events
 
     dev = raw_dev.init_device()
-    t = raw_dev.timeout
+    t = raw_dev.t
     healthy = true
 
     try
@@ -63,7 +65,7 @@ function device_loop(raw_dev)
             end
         end
     finally
-        close_device(dev)
+        raw_dev.close_device(dev)
     end
 end
 
@@ -73,18 +75,19 @@ struct RawDevice
     read_signal::Function
     close_device::Function
     t::Float64 # seconds
-    device_cmd::Channel{DeviceCommand},
+    device_cmd::Channel{DeviceCommand}
     device_events::Channel{SystemEvent}
 end
 
 # ---- Mock hardware ----
 MockDevice() = RawDevice(
-    init_device() = Dict(),
-    set_param(dev, name, value) = :ok,
-    read_signal(dev, name) = rand(),
-    close_device(dev) = nothing,
-    device_cmd = Channel{DeviceCommand}(32),
-    device_events = Channel{SystemEvent}(32)
+    () -> Dict(),
+    (dev, name, value) -> :ok,
+    (dev, name) -> rand(),
+    dev -> nothing,
+    1.0,
+    Channel{DeviceCommand}(32),
+    Channel{SystemEvent}(32)
 )
 
 function call_with_timeout(f, timeout)
@@ -95,4 +98,6 @@ function call_with_timeout(f, timeout)
     catch
         return :timeout
     end
+end
+
 end

@@ -3,7 +3,7 @@ module Reducer
 using ..State
 using ..Measurement
 using ..Power
-using ..Device
+using ..DeviceManager
 
 export reduce!
 

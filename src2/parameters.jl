@@ -1,7 +1,7 @@
 module Parameters
 
 export ScanAxis, FixedAxis, IndependentAxis, DependentAxis, MultiDependentAxis, LoopAxis, 
-       ScanAxisSet, expand, axis_name, has_axis
+       ScanAxisSet, expand, axis_name, has_axis, axes_dict
 
 abstract type ScanAxis end
 
@@ -50,8 +50,26 @@ function has_axis(plan::ScanAxisSet, name::Symbol)
     any(ax -> axis_name(ax) == name, plan.axes)
 end
 
+function axes_dict(plan::ScanAxisSet)
+    params = Dict{Symbol,ScanAxis}()
+    for ax in plan.axes
+        params[axis_name(ax)] = ax
+    end
+    return params
+end
+
+expand(ax::IndependentAxis) = ax.values
+expand(ax::FixedAxis) = [ax.value]
+expand(ax::LoopAxis) = ax.stop === nothing ? [ax.start] : collect(ax.start:ax.step:ax.stop)
+function expand(ax::DependentAxis)
+    error("expand for DependentAxis requires concrete dependency values")
+end
+function expand(ax::MultiDependentAxis)
+    error("expand for MultiDependentAxis requires concrete dependency values")
+end
+
 function axes_to_plan(p_init)
-    axes = ScanAxisSet[]
+    axes = ScanAxis[]
     for (k, v) in p_init
         if k == :loop
             push!(axes, LoopAxis(name=:loop, start=Int(v), step=1, stop=nothing))
@@ -64,4 +82,6 @@ function axes_to_plan(p_init)
         end
     end
     return ScanAxisSet(axes)
+end
+
 end

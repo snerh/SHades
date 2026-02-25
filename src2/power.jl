@@ -1,15 +1,16 @@
 module Power
 
-using ..Device
+using ..DeviceManager
 
-export PowerCommand, laser_loop, PowerUpdate
+export PowerCommand, power_loop, LaserPowerUpdate
 
 abstract type PowerCommand end
-struct StartStab <: LaserCommand end
-struct SetTargetPower <: LaserCommand 
-    val:Float64
+struct StartStab <: PowerCommand end
+struct SetTargetPower <: PowerCommand 
+    val::Float64
 end
-struct StopStabr <: LaserCommand end
+struct StopStab <: PowerCommand end
+const StopStabr = StopStab
 
 struct LaserPowerUpdate <: SystemEvent
     power::Float64
@@ -25,7 +26,7 @@ function power_loop(cmd_ch, event_ch, manager)
         if isready(cmd_ch)
             cmd = take!(cmd_ch)
             running = cmd isa StartStab
-            if cmd ias SetTargetPower
+            if cmd isa SetTargetPower
                 target = cmd.val
             end
         end
@@ -49,8 +50,7 @@ function power_loop(cmd_ch, event_ch, manager)
             frac0 = sin(ang*2)^2
             # required power fraction
             frac = max(0,min(target/real_power*frac0,1)) 
-            new_ang = asin(frac_m^0.5)/2 # 0 - cross π/4 - parallel
-            Log.printlog("new angle = ", ang)
+            new_ang = asin(frac^0.5)/2 # 0 - cross π/4 - parallel
 
             put!(manager.devices[:ell], SetParameter(:ang_power, new_ang,reply))
             resp = take!(reply)
