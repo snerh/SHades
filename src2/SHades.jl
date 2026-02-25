@@ -19,43 +19,62 @@ using .Measurement
 using .Power
 using .Reducer
 
+export AppRuntime, run, stop!
+export start_measurement!, stop_measurement!
+export start_power_stabilization!, stop_power_stabilization!, set_target_power!
+
+mutable struct AppRuntime
+    state::AppState
+    device_hub::DeviceHub
+    meas_cmd::Channel{MeasurementCommand}
+    power_cmd::Channel{PowerCommand}
+    tasks::Vector{Task}
+end
+
 function run()
 
     state = AppState()
 
-    device_cmd = Channel{DeviceCommand}(32)
     meas_cmd = Channel{MeasurementCommand}(16)
     meas_events = Channel{SystemEvent}(32)
 
     power_cmd = Channel{PowerCommand}(16)
     power_events = Channel{SystemEvent}(32)
     md = MockDevice()
-    device_manager = DeviceManager.DeviceManager(Dict(
+    device_hub = DeviceHub(Dict(
         :laser => md.device_cmd,
         :spec => md.device_cmd,
         :ell => md.device_cmd,
         :cam => md.device_cmd,
         :pd => md.device_cmd,
     ))
-    @async device_loop(md) ## тут должны быть все приборы, пока заглушка с одним
-    @async measurement_loop(meas_cmd, meas_events, device_manager)
-    @async power_loop(power_cmd, power_events, device_manager)
+    t_device = @async device_loop(md) ## тут должны быть все приборы, пока заглушка с одним
+    t_measure = @async measurement_loop(meas_cmd, meas_events, device_hub)
+    t_power = @async power_loop(power_cmd, power_events, device_hub)
 
     # Центральный event bus
     event_bus = Channel{SystemEvent}(64)
 
-    @async forward(meas_events, event_bus)
-    @async forward(power_events, event_bus)
-    @async forward(md.device_events, event_bus)
+    t_fwd_meas = @async forward(meas_events, event_bus)
+    t_fwd_power = @async forward(power_events, event_bus)
+    t_fwd_dev = @async forward(md.device_events, event_bus)
+
+    t_bus_closer = @async begin
+        wait(t_fwd_meas)
+        wait(t_fwd_power)
+        wait(t_fwd_dev)
+        close(event_bus)
+    end
 
     # UI event pump (Gtk должен вызывать reduce! из main thread)
-    @async begin
+    t_reducer = @async begin
         for ev in event_bus
             reduce!(state, ev)
         end
     end
 
-    return state
+    tasks = Task[t_device, t_measure, t_power, t_fwd_meas, t_fwd_power, t_fwd_dev, t_bus_closer, t_reducer]
+    return AppRuntime(state, device_hub, meas_cmd, power_cmd, tasks)
 end
 
 function forward(src, dst)
@@ -63,5 +82,43 @@ function forward(src, dst)
         put!(dst, ev)
     end
 end
+
+function _put_if_open!(ch, cmd)
+    if isopen(ch)
+        try
+            put!(ch, cmd)
+        catch ex
+            ex isa InvalidStateException || rethrow(ex)
+        end
+    end
+    return nothing
+end
+
+function _close_if_open!(ch)
+    isopen(ch) && close(ch)
+    return nothing
+end
+
+function stop!(runtime::AppRuntime; timeout_s::Float64=2.0)
+    _put_if_open!(runtime.meas_cmd, ShutdownMeasurement())
+    _put_if_open!(runtime.power_cmd, ShutdownPower())
+    _put_if_open!(runtime.device.device_cmd, ShutdownDevice())
+
+    _close_if_open!(runtime.meas_cmd)
+    _close_if_open!(runtime.power_cmd)
+    _close_if_open!(runtime.device.device_cmd)
+
+    for t in runtime.tasks
+        timedwait(() -> istaskdone(t), timeout_s)
+    end
+    return runtime.state
+end
+
+start_measurement!(runtime::AppRuntime, params::ScanAxisSet) = put!(runtime.meas_cmd, StartMeasurement(params))
+stop_measurement!(runtime::AppRuntime) = put!(runtime.meas_cmd, StopMeasurement())
+
+start_power_stabilization!(runtime::AppRuntime) = put!(runtime.power_cmd, StartStab())
+stop_power_stabilization!(runtime::AppRuntime) = put!(runtime.power_cmd, StopStab())
+set_target_power!(runtime::AppRuntime, value::Real) = put!(runtime.power_cmd, SetTargetPower(Float64(value)))
 
 end

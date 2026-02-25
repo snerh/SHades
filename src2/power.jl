@@ -2,7 +2,8 @@ module Power
 
 using ..DeviceManager
 
-export PowerCommand, power_loop, LaserPowerUpdate
+export PowerCommand, StartStab, SetTargetPower, StopStab, ShutdownPower
+export power_loop, LaserPowerUpdate
 
 abstract type PowerCommand end
 struct StartStab <: PowerCommand end
@@ -10,55 +11,79 @@ struct SetTargetPower <: PowerCommand
     val::Float64
 end
 struct StopStab <: PowerCommand end
+struct ShutdownPower <: PowerCommand end
 const StopStabr = StopStab
 
 struct LaserPowerUpdate <: SystemEvent
     power::Float64
 end
 
-function power_loop(cmd_ch, event_ch, manager)
+function _power_step!(event_ch, manager, target)
+    reply = Channel(1)
 
-    running = false
-    target = 1
+    put!(manager.devices[:pd], ReadSignal(:power, reply))
+    real_power = take!(reply)
+    if real_power < 0
+        real_power = abs(real_power)
+        @warn "Measured power is negative! You have to go back in time and correct it!"
+    end
+    put!(event_ch, LaserPowerUpdate(real_power))
 
-    while true
+    put!(manager.devices[:ell], ReadSignal(:ang_power, reply))
+    ang = take!(reply)
 
-        if isready(cmd_ch)
-            cmd = take!(cmd_ch)
-            running = cmd isa StartStab
-            if cmd isa SetTargetPower
-                target = cmd.val
+    frac0 = sin(ang * 2)^2
+    safe_power = max(real_power, eps(Float64))
+    frac = clamp(target / safe_power * frac0, 0.0, 1.0)
+    new_ang = asin(sqrt(frac)) / 2
+
+    put!(manager.devices[:ell], SetParameter(:ang_power, new_ang, reply))
+    take!(reply)
+    return nothing
+end
+
+function _power_worker(event_ch, manager, running, target, shutdown; period_s=0.1)
+    while !shutdown[]
+        if running[]
+            try
+                _power_step!(event_ch, manager, target[])
+            catch ex
+                put!(event_ch, DeviceError("Power loop failed: $(sprint(showerror, ex))"))
             end
         end
+        sleep(period_s)
+    end
+    return nothing
+end
 
-        if running
-            reply = Channel(1)
-            # get current power
-            put!(manager.devices[:pd], ReadSignal(:power, reply))
-            real_power = take!(reply)
-            if real_power < 0
-				real_power = abs(real_power)
-				@warn "Measured power is negative! You have to go back in time and correct it!"
-			end
-            # put current power to AppState
-            put!(event_ch, LaserPowerUpdate(real_power))
+function power_loop(cmd_ch, event_ch, manager)
+    running = Ref(false)
+    target = Ref(1.0)
+    shutdown = Ref(false)
+    worker = @async _power_worker(event_ch, manager, running, target, shutdown)
 
-            # get current λ/2 angle
-            put!(manager.devices[:ell], ReadSignal(:ang_power, reply))
-            ang = take!(reply)
-
-            frac0 = sin(ang*2)^2
-            # required power fraction
-            frac = max(0,min(target/real_power*frac0,1)) 
-            new_ang = asin(frac^0.5)/2 # 0 - cross π/4 - parallel
-
-            put!(manager.devices[:ell], SetParameter(:ang_power, new_ang,reply))
-            resp = take!(reply)
-
-            
-        else
-            sleep(0.5)
+    try
+        while true
+            cmd = try
+                take!(cmd_ch)
+            catch ex
+                ex isa InvalidStateException ? break : rethrow(ex)
+            end
+            if cmd isa StartStab
+                running[] = true
+            elseif cmd isa StopStab
+                running[] = false
+            elseif cmd isa SetTargetPower
+                target[] = cmd.val
+            elseif cmd isa ShutdownPower
+                running[] = false
+                break
+            end
         end
+    finally
+        shutdown[] = true
+        wait(worker)
+        close(event_ch)
     end
 end
 

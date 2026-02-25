@@ -1,12 +1,12 @@
 module DeviceManager
 
-export DeviceManager, RawDevice, MockDevice
+export DeviceHub, RawDevice, MockDevice
 export DeviceCommand, SetParameter, ReadSignal, ShutdownDevice
 export device_loop, SystemEvent, DeviceError
 
 abstract type DeviceCommand end
 
-struct DeviceManager
+struct DeviceHub
     devices::Dict{Symbol,Channel{DeviceCommand}}
 end
 
@@ -66,6 +66,7 @@ function device_loop(raw_dev)
         end
     finally
         raw_dev.close_device(dev)
+        close(event_ch)
     end
 end
 
@@ -92,12 +93,11 @@ MockDevice() = RawDevice(
 
 function call_with_timeout(f, timeout)
     t = @async f()
-    try
-        wait(Timeout(timeout), t)
+    status = timedwait(() -> istaskdone(t), timeout)
+    if status == :ok
         return fetch(t)
-    catch
-        return :timeout
     end
+    return :timeout
 end
 
 end

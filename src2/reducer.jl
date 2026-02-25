@@ -16,6 +16,9 @@ function reduce!(state::AppState, ev)
     elseif ev isa MeasurementDone
         state.measurement_state = Finished
 
+    elseif ev isa MeasurementStopped
+        state.measurement_state = Idle
+
     elseif ev isa LaserPowerUpdate
         state.current_power = ev.power
 
