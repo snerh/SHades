@@ -9,6 +9,7 @@ include("measurement.jl")
 include("power.jl")
 include("reducer.jl")
 include("persistence.jl")
+include("gtk_ui.jl")
 
 using .Domain
 using .Parameters
@@ -18,6 +19,7 @@ using .DeviceManager
 using .Measurement
 using .Power
 using .Reducer
+using .GtkUI
 
 export AppRuntime, run, stop!
 export start_measurement!, stop_measurement!
@@ -28,6 +30,7 @@ mutable struct AppRuntime
     device_hub::DeviceHub
     meas_cmd::Channel{MeasurementCommand}
     power_cmd::Channel{PowerCommand}
+    ui_cmd::Channel{Nothing}
     tasks::Vector{Task}
 end
 
@@ -40,6 +43,9 @@ function run()
 
     power_cmd = Channel{PowerCommand}(16)
     power_events = Channel{SystemEvent}(32)
+
+    ui_cmd = Channel{Nothing}(16)
+
     md = MockDevice()
     device_hub = DeviceHub(Dict(
         :laser => md.device_cmd,
@@ -70,11 +76,12 @@ function run()
     t_reducer = @async begin
         for ev in event_bus
             reduce!(state, ev)
+            put!(ui_cmd, nothing)
         end
     end
 
     tasks = Task[t_device, t_measure, t_power, t_fwd_meas, t_fwd_power, t_fwd_dev, t_bus_closer, t_reducer]
-    return AppRuntime(state, device_hub, meas_cmd, power_cmd, tasks)
+    return AppRuntime(state, device_hub, meas_cmd, power_cmd, ui_cmd, tasks)
 end
 
 function forward(src, dst)

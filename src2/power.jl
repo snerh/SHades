@@ -12,7 +12,6 @@ struct SetTargetPower <: PowerCommand
 end
 struct StopStab <: PowerCommand end
 struct ShutdownPower <: PowerCommand end
-const StopStabr = StopStab
 
 struct LaserPowerUpdate <: SystemEvent
     power::Float64
@@ -20,7 +19,7 @@ end
 
 function _power_step!(event_ch, manager, target)
     reply = Channel(1)
-
+    # get current power
     put!(manager.devices[:pd], ReadSignal(:power, reply))
     real_power = take!(reply)
     if real_power < 0
@@ -29,6 +28,7 @@ function _power_step!(event_ch, manager, target)
     end
     put!(event_ch, LaserPowerUpdate(real_power))
 
+    #get current angle
     put!(manager.devices[:ell], ReadSignal(:ang_power, reply))
     ang = take!(reply)
 
