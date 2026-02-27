@@ -7,9 +7,9 @@ include("state.jl")
 include("device_manager.jl")
 include("measurement.jl")
 include("power.jl")
-include("reducer.jl")
 include("persistence.jl")
-include("gtk_ui.jl")
+include("view/gtk_ui.jl")
+include("reducer.jl")
 
 using .Domain
 using .Parameters
@@ -24,12 +24,15 @@ using .GtkUI
 export AppRuntime, run, stop!
 export start_measurement!, stop_measurement!
 export start_power_stabilization!, stop_power_stabilization!, set_target_power!
+export start_gtk_ui!
 
 mutable struct AppRuntime
     state::AppState
+    device::RawDevice
     device_hub::DeviceHub
     meas_cmd::Channel{MeasurementCommand}
     power_cmd::Channel{PowerCommand}
+    ui_events::Channel{SystemEvent}
     ui_cmd::Channel{Nothing}
     tasks::Vector{Task}
 end
@@ -44,6 +47,7 @@ function run()
     power_cmd = Channel{PowerCommand}(16)
     power_events = Channel{SystemEvent}(32)
 
+    ui_events = Channel{SystemEvent}(32)
     ui_cmd = Channel{Nothing}(16)
 
     md = MockDevice()
@@ -64,11 +68,13 @@ function run()
     t_fwd_meas = @async forward(meas_events, event_bus)
     t_fwd_power = @async forward(power_events, event_bus)
     t_fwd_dev = @async forward(md.device_events, event_bus)
+    t_fwd_ui = @async forward(ui_events, event_bus)
 
     t_bus_closer = @async begin
         wait(t_fwd_meas)
         wait(t_fwd_power)
         wait(t_fwd_dev)
+        wait(t_fwd_ui)
         close(event_bus)
     end
 
@@ -80,8 +86,8 @@ function run()
         end
     end
 
-    tasks = Task[t_device, t_measure, t_power, t_fwd_meas, t_fwd_power, t_fwd_dev, t_bus_closer, t_reducer]
-    return AppRuntime(state, device_hub, meas_cmd, power_cmd, ui_cmd, tasks)
+    tasks = Task[t_device, t_measure, t_power, t_fwd_meas, t_fwd_power, t_fwd_dev, t_fwd_ui, t_bus_closer, t_reducer]
+    return AppRuntime(state, md, device_hub, meas_cmd, power_cmd, ui_events, ui_cmd, tasks)
 end
 
 function forward(src, dst)
@@ -113,6 +119,7 @@ function stop!(runtime::AppRuntime; timeout_s::Float64=2.0)
 
     _close_if_open!(runtime.meas_cmd)
     _close_if_open!(runtime.power_cmd)
+    _close_if_open!(runtime.ui_events)
     _close_if_open!(runtime.device.device_cmd)
 
     for t in runtime.tasks
@@ -127,5 +134,8 @@ stop_measurement!(runtime::AppRuntime) = put!(runtime.meas_cmd, StopMeasurement(
 start_power_stabilization!(runtime::AppRuntime) = put!(runtime.power_cmd, StartStab())
 stop_power_stabilization!(runtime::AppRuntime) = put!(runtime.power_cmd, StopStab())
 set_target_power!(runtime::AppRuntime, value::Real) = put!(runtime.power_cmd, SetTargetPower(Float64(value)))
+
+start_gtk_ui!(runtime::AppRuntime; config_path::AbstractString="preset.toml", title::AbstractString="SHades2.0") =
+    GtkUI.start_gtk_ui!(runtime.state, runtime.ui_events, runtime.ui_cmd; config_path=config_path, title=title)
 
 end

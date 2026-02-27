@@ -4,6 +4,8 @@ using ..State
 using ..Measurement
 using ..Power
 using ..DeviceManager
+using ..ParameterParser
+using ..GtkUI: SetParam
 
 export reduce!
 
@@ -22,10 +24,18 @@ function reduce!(state::AppState, ev)
     elseif ev isa LaserPowerUpdate
         state.current_power = ev.power
 
-    elseif ev ias SetParam
-        param_index = findfirst(x->x[1] == ev.name, state.raw_params)
-        state.raw_params[param_index] = name => ev.val
-        state.scan_params = build_scan_axis_set_from_text_specs(state.raw_params)
+    elseif ev isa SetParam
+        param_index = findfirst(x -> x[1] == ev.name, state.raw_params)
+        if param_index === nothing
+            push!(state.raw_params, ev.name => ev.val)
+        else
+            state.raw_params[param_index] = ev.name => ev.val
+        end
+        try
+            state.scan_params = build_scan_axis_set_from_text_specs(state.raw_params)
+        catch
+            # Keep previous scan_params while user is still editing.
+        end
 
     elseif ev isa DeviceError
         state.measurement_state = Error
