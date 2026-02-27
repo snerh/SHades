@@ -187,7 +187,4 @@ function build_scan_axis_set_from_text_specs(specs::Vector{Pair{Symbol,String}};
     return ScanAxisSet(axes)
 end
 
-build_scan_plan_from_text_specs(specs::Vector{Pair{Symbol,String}}; fixed::AbstractVector{<:Pair}=Pair{Symbol,Any}[]) =
-    build_scan_axis_set_from_text_specs(specs; fixed=fixed)
-
 end

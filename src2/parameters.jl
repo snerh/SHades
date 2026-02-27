@@ -84,4 +84,8 @@ function axes_to_plan(p_init)
     return ScanAxisSet(axes)
 end
 
+function axis_set_to_points(sas::ScanAxisSet)
+    
+end
+
 end
