@@ -26,10 +26,14 @@ function reduce!(state::AppState, ev)
 
     elseif ev isa SetParam
         param_index = findfirst(x -> x[1] == ev.name, state.raw_params)
+        println("==========SetParam==========")
+        println("$(ev.name) -> $(ev.val)")
         if param_index === nothing
             push!(state.raw_params, ev.name => ev.val)
         else
             state.raw_params[param_index] = ev.name => ev.val
+            println("===New state:===")
+            println(state)
         end
         try
             state.scan_params = build_scan_axis_set_from_text_specs(state.raw_params)
