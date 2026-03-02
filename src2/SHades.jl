@@ -7,6 +7,7 @@ include("state.jl")
 include("device_manager.jl")
 include("measurement.jl")
 include("power.jl")
+include("view/plot_render.jl")
 include("processing.jl")
 include("persistence.jl")
 include("view/gtk_ui.jl")
@@ -20,6 +21,7 @@ using .DeviceManager
 using .Measurement
 using .Power
 using .Processing
+using .PlotRender
 using .Reducer
 using .GtkUI
 
@@ -27,6 +29,7 @@ export AppRuntime, run, stop!
 export start_measurement!, stop_measurement!
 export start_power_stabilization!, stop_power_stabilization!, set_target_power!
 export start_gtk_ui!
+export save_plot_dat, save_plot_png
 export save_spectrum_dat, save_spectrum_png
 
 mutable struct AppRuntime

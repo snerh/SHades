@@ -1,63 +1,37 @@
 module Processing
 
 import Cairo
-import Printf
 
 using ..Domain
+using ..PlotRender: render_signal_plot!
 
+export save_plot_dat, save_plot_png
 export save_spectrum_dat, save_spectrum_png
 
-function _fmt_tick(v::Float64)
-    a = abs(v)
-    if a != 0 && (a >= 1e4 || a < 1e-3)
-        return Printf.@sprintf("%.2e", v)
+@inline function _to_num(v)
+    v isa Number && return Float64(v)
+    try
+        return parse(Float64, String(v))
+    catch
+        return NaN
     end
-    return string(round(v, sigdigits=4))
 end
 
-function _nice_tick_step(span::Float64, target::Int=6)
-    s = max(abs(span), 1e-12)
-    raw = s / max(target, 1)
-    pow10 = 10.0 ^ floor(log10(raw))
-    f = raw / pow10
-    base =
-        f <= 1.0 ? 1.0 :
-        f <= 2.0 ? 2.0 :
-        f <= 5.0 ? 5.0 : 10.0
-    return base * pow10
+@inline function _point_axis(p::Point, axis::Symbol)::Float64
+    return _to_num(get(p, axis, NaN))
 end
 
-function _nice_ticks(lo::Float64, hi::Float64; target::Int=6)
-    if hi < lo
-        lo, hi = hi, lo
+function _maybe_log10(v::Vector{Float64}; enabled::Bool=false)
+    !enabled && return copy(v)
+    out = Float64[]
+    for x in v
+        if x > 0
+            push!(out, log10(x))
+        else
+            push!(out, NaN)
+        end
     end
-    if hi == lo
-        return [lo]
-    end
-    step = _nice_tick_step(hi - lo, target)
-    start = ceil(lo / step) * step
-    stopv = floor(hi / step) * step
-    stopv < start && return [lo, hi]
-    ticks = Float64[]
-    t = start
-    for _ in 1:1000
-        t > stopv + step * 1e-9 && break
-        push!(ticks, abs(t) < step * 1e-12 ? 0.0 : t)
-        t += step
-    end
-    return isempty(ticks) ? [lo, hi] : ticks
-end
-
-function _limits(v::Vector{Float64})
-    isempty(v) && return (0.0, 1.0)
-    lo = minimum(v)
-    hi = maximum(v)
-    if lo == hi
-        d = lo == 0 ? 1.0 : abs(lo) * 0.1
-        return (lo - d, hi + d)
-    end
-    pad = (hi - lo) * 0.05
-    return (lo - pad, hi + pad)
+    return out
 end
 
 function _header_string(params::AbstractDict)
@@ -68,90 +42,148 @@ function _header_string(params::AbstractDict)
     return join(chunks, ";")
 end
 
-function save_spectrum_dat(path::AbstractString, spec::Spectrum; params::AbstractDict=Dict{Symbol,Any}())
+function _collect_xy(points::Vector{Point}, xaxis::Symbol, yaxis::Symbol; log_scale::Bool=false)
+    xs = Float64[]
+    ys = Float64[]
+    for p in points
+        x = _point_axis(p, xaxis)
+        y = _point_axis(p, yaxis)
+        if isfinite(x) && isfinite(y)
+            push!(xs, x)
+            push!(ys, y)
+        end
+    end
+    ydraw = _maybe_log10(ys; enabled=log_scale)
+    keep = [isfinite(xs[i]) && isfinite(ydraw[i]) for i in eachindex(xs)]
+    return xs[keep], ydraw[keep]
+end
+
+function _aggregate_xyz(points::Vector{Point}, xaxis::Symbol, yaxis::Symbol, zaxis::Symbol; log_scale::Bool=false)
+    xs = Float64[]
+    ys = Float64[]
+    zs = Float64[]
+    for p in points
+        x = _point_axis(p, xaxis)
+        y = _point_axis(p, yaxis)
+        z = _point_axis(p, zaxis)
+        if isfinite(x) && isfinite(y) && isfinite(z)
+            push!(xs, x)
+            push!(ys, y)
+            push!(zs, z)
+        end
+    end
+    zdraw = _maybe_log10(zs; enabled=log_scale)
+
+    acc = Dict{Tuple{Float64,Float64},Tuple{Float64,Int}}()
+    for i in eachindex(xs)
+        isfinite(zdraw[i]) || continue
+        k = (xs[i], ys[i])
+        if haskey(acc, k)
+            s, n = acc[k]
+            acc[k] = (s + zdraw[i], n + 1)
+        else
+            acc[k] = (zdraw[i], 1)
+        end
+    end
+
+    rows = NamedTuple{(:x, :y, :z, :n),Tuple{Float64,Float64,Float64,Int}}[]
+    for ((x, y), (s, n)) in sort(collect(acc); by=x -> x[1])
+        push!(rows, (x=x, y=y, z=s / n, n=n))
+    end
+    return rows
+end
+
+function save_plot_dat(
+    path::AbstractString,
+    points::Vector{Point};
+    xaxis::Symbol=:wl,
+    yaxis::Symbol=:sig,
+    zaxis::Symbol=:sig,
+    mode::Symbol=:line,
+    log_scale::Bool=false,
+    params::AbstractDict=Dict{Symbol,Any}(),
+)
     mkpath(dirname(path))
     open(path, "w") do io
         full = Dict{Symbol,Any}(k => v for (k, v) in params)
-        full[:columns] = ("wavelength", "signal")
-        println(io, "# ", _header_string(full))
-        n = min(length(spec.wavelength), length(spec.signal))
-        for i in 1:n
-            println(io, "$(spec.wavelength[i]) $(spec.signal[i])")
+        full[:mode] = mode
+        full[:xaxis] = xaxis
+        full[:yaxis] = yaxis
+        full[:zaxis] = zaxis
+        full[:log_scale] = log_scale
+
+        if mode == :heatmap
+            rows = _aggregate_xyz(points, xaxis, yaxis, zaxis; log_scale=log_scale)
+            zcol = log_scale ? Symbol("log10_$(zaxis)") : zaxis
+            full[:columns] = (xaxis, yaxis, zcol, :samples)
+            println(io, "# ", _header_string(full))
+            for r in rows
+                println(io, "$(r.x) $(r.y) $(r.z) $(r.n)")
+            end
+        else
+            xs, ys = _collect_xy(points, xaxis, yaxis; log_scale=log_scale)
+            ycol = log_scale ? Symbol("log10_$(yaxis)") : yaxis
+            full[:columns] = (xaxis, ycol)
+            println(io, "# ", _header_string(full))
+            n = min(length(xs), length(ys))
+            for i in 1:n
+                println(io, "$(xs[i]) $(ys[i])")
+            end
         end
     end
     return path
 end
 
-function save_spectrum_png(path::AbstractString, spec::Spectrum; width::Int=900, height::Int=520, title::String="spectrum")
+function save_plot_png(
+    path::AbstractString,
+    points::Vector{Point};
+    xaxis::Symbol=:wl,
+    yaxis::Symbol=:sig,
+    zaxis::Symbol=:sig,
+    mode::Symbol=:line,
+    log_scale::Bool=false,
+    width::Int=900,
+    height::Int=520,
+    title::String="",
+)
     out = endswith(lowercase(path), ".png") ? path : string(path, ".png")
     mkpath(dirname(out))
 
-    xs = spec.wavelength
-    ys = spec.signal
-    n = min(length(xs), length(ys))
-
     surf = Cairo.CairoImageSurface(width, height, Cairo.FORMAT_ARGB32)
     ctx = Cairo.CairoContext(surf)
-    w = Float64(width)
-    h = Float64(height)
-    left, top = 60.0, 24.0
-    pw = max(w - 96, 1)
-    ph = max(h - 72, 1)
-
-    Cairo.set_source_rgb(ctx, 1, 1, 1)
-    Cairo.rectangle(ctx, 0, 0, w, h)
-    Cairo.fill(ctx)
-
-    Cairo.set_source_rgb(ctx, 0.15, 0.15, 0.15)
-    Cairo.set_line_width(ctx, 1.0)
-    Cairo.rectangle(ctx, left, top, pw, ph)
-    Cairo.stroke(ctx)
-    Cairo.set_font_size(ctx, 12)
-    Cairo.move_to(ctx, left, 16)
-    Cairo.show_text(ctx, title)
-
-    if n > 0
-        xvals = Float64[xs[i] for i in 1:n if isfinite(xs[i]) && isfinite(ys[i])]
-        yvals = Float64[ys[i] for i in 1:n if isfinite(xs[i]) && isfinite(ys[i])]
-        if !isempty(xvals)
-            xmin, xmax = _limits(xvals)
-            ymin, ymax = _limits(yvals)
-            xspan = max(xmax - xmin, 1e-12)
-            yspan = max(ymax - ymin, 1e-12)
-
-            Cairo.set_source_rgb(ctx, 0.2, 0.2, 0.2)
-            Cairo.set_font_size(ctx, 10)
-            for xv in _nice_ticks(xmin, xmax; target=6)
-                x = left + (xv - xmin) / xspan * pw
-                y = top + ph
-                Cairo.move_to(ctx, x, y); Cairo.line_to(ctx, x, y + 4); Cairo.stroke(ctx)
-                Cairo.move_to(ctx, x - 14, y + 15); Cairo.show_text(ctx, _fmt_tick(xv))
-            end
-            for yv in _nice_ticks(ymin, ymax; target=6)
-                x = left
-                y = top + ph - (yv - ymin) / yspan * ph
-                Cairo.move_to(ctx, x - 4, y); Cairo.line_to(ctx, x, y); Cairo.stroke(ctx)
-                Cairo.move_to(ctx, 4, y + 3); Cairo.show_text(ctx, _fmt_tick(yv))
-            end
-
-            tx(x) = left + (x - xmin) / xspan * pw
-            ty(y) = top + ph - (y - ymin) / yspan * ph
-            Cairo.set_source_rgb(ctx, 0.03, 0.38, 0.62)
-            Cairo.set_line_width(ctx, 1.7)
-            Cairo.move_to(ctx, tx(xvals[1]), ty(yvals[1]))
-            for i in 2:length(xvals)
-                Cairo.line_to(ctx, tx(xvals[i]), ty(yvals[i]))
-            end
-            Cairo.stroke(ctx)
-        end
-    end
-
+    render_signal_plot!(
+        ctx,
+        Float64(width),
+        Float64(height),
+        points;
+        xaxis=xaxis,
+        yaxis=yaxis,
+        zaxis=zaxis,
+        mode=mode,
+        log_scale=log_scale,
+        title=title,
+    )
     Cairo.write_to_png(surf, out)
     try
         Cairo.finish(surf)
     catch
     end
     return out
+end
+
+function _spec_to_points(spec::Spectrum)
+    n = min(length(spec.wavelength), length(spec.signal))
+    return [Dict{Symbol,Any}(:wl => spec.wavelength[i], :sig => spec.signal[i]) for i in 1:n]
+end
+
+function save_spectrum_dat(path::AbstractString, spec::Spectrum; params::AbstractDict=Dict{Symbol,Any}())
+    pts = _spec_to_points(spec)
+    return save_plot_dat(path, pts; xaxis=:wl, yaxis=:sig, mode=:line, log_scale=false, params=params)
+end
+
+function save_spectrum_png(path::AbstractString, spec::Spectrum; width::Int=900, height::Int=520, title::String="spectrum")
+    pts = _spec_to_points(spec)
+    return save_plot_png(path, pts; xaxis=:wl, yaxis=:sig, mode=:line, log_scale=false, width=width, height=height, title=title)
 end
 
 end

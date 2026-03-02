@@ -1,8 +1,6 @@
 module GtkUI
 
 import Gtk
-import Cairo
-import Printf
 
 using ..State
 using ..Parameters
@@ -11,7 +9,8 @@ using ..ParameterParser
 using ..DeviceManager: SystemEvent, DeviceHub, connect_devices!, init_devices!, disconnect_devices!, devices_status
 using ..Measurement: MeasurementCommand, StartMeasurement, StopMeasurement
 using ..Power: PowerCommand, StartStab, StopStab
-using ..Processing: save_spectrum_dat, save_spectrum_png
+using ..Processing: save_plot_dat, save_plot_png
+using ..PlotRender: DEFAULT_AXIS_CHOICES, render_signal_plot!
 
 export SetParam, AxisEntry, GtkApp, start_gtk_ui!, render!, test_gtk
 
@@ -40,6 +39,11 @@ mutable struct GtkApp
     points_label::Any
     file_label::Any
     dir_label::Any
+    xbox::Any
+    ybox::Any
+    zbox::Any
+    mode_box::Any
+    log_cb::Any
     canvas_signal::Any
     canvas_raw::Any
 end
@@ -89,6 +93,35 @@ function _collect_raw_params(entries::Dict{Symbol,AxisEntry}, template::Vector{P
     return out
 end
 
+function _active_text(box, fallback::AbstractString)
+    t = Gtk.GAccessor.active_text(box)
+    t === nothing && return String(fallback)
+    return Gtk.bytestring(t)
+end
+
+function _plot_settings(ui::GtkApp)
+    mode_txt = _active_text(ui.mode_box, "line")
+    return (
+        xaxis = Symbol(_active_text(ui.xbox, "wl")),
+        yaxis = Symbol(_active_text(ui.ybox, "sig")),
+        zaxis = Symbol(_active_text(ui.zbox, "sig")),
+        mode = Symbol(mode_txt),
+        log_scale = Gtk.GAccessor.active(ui.log_cb),
+    )
+end
+
+function _set_combo_active!(box, values::Vector{String}, wanted::String)
+    idx = findfirst(==(wanted), values)
+    Gtk.set_gtk_property!(box, :active, Int((idx === nothing ? 1 : idx) - 1))
+    return nothing
+end
+
+function _update_plot_controls!(ui::GtkApp)
+    mode_txt = _active_text(ui.mode_box, "line")
+    Gtk.set_gtk_property!(ui.zbox, :sensitive, mode_txt == "heatmap")
+    return nothing
+end
+
 function _safe_canvas_ctx(canvas)
     try
         return Gtk.getgc(canvas)
@@ -100,187 +133,37 @@ function _safe_canvas_ctx(canvas)
     end
 end
 
-function _draw_axes!(ctx, w::Float64, h::Float64; title::String="")
-    Cairo.set_source_rgb(ctx, 1, 1, 1)
-    Cairo.rectangle(ctx, 0, 0, w, h)
-    Cairo.fill(ctx)
-
-    Cairo.set_source_rgb(ctx, 0.15, 0.15, 0.15)
-    Cairo.set_line_width(ctx, 1.0)
-    Cairo.rectangle(ctx, 40, 15, max(w - 55, 1), max(h - 40, 1))
-    Cairo.stroke(ctx)
-
-    if !isempty(title)
-        Cairo.move_to(ctx, 45, 12)
-        Cairo.set_font_size(ctx, 12)
-        Cairo.show_text(ctx, title)
+function _signal_points(state::AppState)
+    if !isempty(state.points)
+        return state.points
     end
-end
-
-function _fmt_tick(v::Float64)
-    a = abs(v)
-    if a != 0 && (a >= 1e4 || a < 1e-3)
-        return Printf.@sprintf("%.2e", v)
-    end
-    return string(round(v, sigdigits=4))
-end
-
-function _nice_tick_step(span::Float64, target::Int=6)
-    s = max(abs(span), 1e-12)
-    raw = s / max(target, 1)
-    pow10 = 10.0 ^ floor(log10(raw))
-    f = raw / pow10
-    base =
-        f <= 1.0 ? 1.0 :
-        f <= 2.0 ? 2.0 :
-        f <= 5.0 ? 5.0 : 10.0
-    return base * pow10
-end
-
-function _nice_ticks(lo::Float64, hi::Float64; target::Int=6)
-    if !isfinite(lo) || !isfinite(hi)
-        return Float64[]
-    end
-    if hi < lo
-        lo, hi = hi, lo
-    end
-    if hi == lo
-        return [lo]
-    end
-
-    step = _nice_tick_step(hi - lo, target)
-    start = ceil(lo / step) * step
-    stopv = floor(hi / step) * step
-    stopv < start && return [lo, hi]
-
-    ticks = Float64[]
-    t = start
-    guard = 0
-    while t <= stopv + step * 1e-9 && guard < 1000
-        push!(ticks, abs(t) < step * 1e-12 ? 0.0 : t)
-        t += step
-        guard += 1
-    end
-    return isempty(ticks) ? [lo, hi] : ticks
-end
-
-function _draw_cartesian_ticks!(ctx, w::Float64, h::Float64, xmin::Float64, xmax::Float64, ymin::Float64, ymax::Float64)
-    left, top = 40.0, 15.0
-    pw = max(w - 55, 1)
-    ph = max(h - 40, 1)
-
-    xspan = max(xmax - xmin, 1e-12)
-    yspan = max(ymax - ymin, 1e-12)
-
-    Cairo.set_source_rgb(ctx, 0.2, 0.2, 0.2)
-    Cairo.set_line_width(ctx, 1.0)
-    Cairo.set_font_size(ctx, 10)
-
-    for xv in _nice_ticks(xmin, xmax; target=6)
-        x = left + (xv - xmin) / xspan * pw
-        y = top + ph
-        Cairo.move_to(ctx, x, y)
-        Cairo.line_to(ctx, x, y + 4)
-        Cairo.stroke(ctx)
-        Cairo.move_to(ctx, x - 14, y + 14)
-        Cairo.show_text(ctx, _fmt_tick(xv))
-    end
-
-    for yv in _nice_ticks(ymin, ymax; target=6)
-        x = left
-        y = top + ph - (yv - ymin) / yspan * ph
-        Cairo.move_to(ctx, x - 4, y)
-        Cairo.line_to(ctx, x, y)
-        Cairo.stroke(ctx)
-        Cairo.move_to(ctx, 2, y + 3)
-        Cairo.show_text(ctx, _fmt_tick(yv))
-    end
-    return nothing
-end
-
-function _nice_limits(v::Vector{Float64})
-    isempty(v) && return (0.0, 1.0)
-    lo = minimum(v)
-    hi = maximum(v)
-    if lo == hi
-        d = lo == 0 ? 1.0 : abs(lo) * 0.1
-        return (lo - d, hi + d)
-    end
-    pad = (hi - lo) * 0.05
-    return (lo - pad, hi + pad)
-end
-
-function _draw_polyline!(ctx, xs::Vector{Float64}, ys::Vector{Float64}, w::Float64, h::Float64; color=(0.05, 0.33, 0.75), title::String="")
-    _draw_axes!(ctx, w, h; title=title)
-    n = min(length(xs), length(ys))
-    n == 0 && return
-
-    x2 = Float64[]
-    y2 = Float64[]
-    for i in 1:n
-        x = xs[i]
-        y = ys[i]
-        if isfinite(x) && isfinite(y)
-            push!(x2, x)
-            push!(y2, y)
-        end
-    end
-    isempty(x2) && return
-
-    xmin, xmax = _nice_limits(x2)
-    ymin, ymax = _nice_limits(y2)
-    _draw_cartesian_ticks!(ctx, w, h, xmin, xmax, ymin, ymax)
-    xspan = max(xmax - xmin, 1e-12)
-    yspan = max(ymax - ymin, 1e-12)
-
-    left, top = 40.0, 15.0
-    pw = max(w - 55, 1)
-    ph = max(h - 40, 1)
-
-    tx(x) = left + (x - xmin) / xspan * pw
-    ty(y) = top + ph - (y - ymin) / yspan * ph
-
-    Cairo.set_source_rgb(ctx, color...)
-    if length(x2) == 1
-        Cairo.arc(ctx, tx(x2[1]), ty(y2[1]), 3.5, 0.0, 2 * pi)
-        Cairo.fill(ctx)
-        return
-    end
-
-    Cairo.set_line_width(ctx, 1.7)
-    Cairo.move_to(ctx, tx(x2[1]), ty(y2[1]))
-    for i in 2:length(x2)
-        Cairo.line_to(ctx, tx(x2[i]), ty(y2[i]))
-    end
-    Cairo.stroke(ctx)
-end
-
-function _signal_xy(state::AppState)
     if state.current_spectrum !== nothing
-        return state.current_spectrum.wavelength, state.current_spectrum.signal
+        n = min(length(state.current_spectrum.wavelength), length(state.current_spectrum.signal))
+        return [Dict{Symbol,Any}(:wl => state.current_spectrum.wavelength[i], :sig => state.current_spectrum.signal[i]) for i in 1:n]
     end
-
-    xs = Float64[]
-    ys = Float64[]
-    for p in state.points
-        if haskey(p, :wl) && haskey(p, :sig)
-            try
-                push!(xs, Float64(p[:wl]))
-                push!(ys, Float64(p[:sig]))
-            catch
-            end
-        end
-    end
-    return xs, ys
+    return Dict{Symbol,Any}[]
 end
 
-function _render_signal_canvas!(canvas, state::AppState)
+function _raw_points(state::AppState)
+    pts = Dict{Symbol,Any}[]
+    for i in eachindex(state.current_raw)
+        push!(pts, Dict{Symbol,Any}(:idx => Float64(i), :value => state.current_raw[i]))
+    end
+    return pts
+end
+
+function _render_signal_canvas!(ui::GtkApp, state::AppState)
+    canvas = ui.canvas_signal
     ctx = _safe_canvas_ctx(canvas)
     ctx === nothing && return nothing
     w = Float64(Gtk.width(canvas))
     h = Float64(Gtk.height(canvas))
-    xs, ys = _signal_xy(state)
-    _draw_polyline!(ctx, xs, ys, w, h; color=(0.03, 0.38, 0.62), title="spectrum")
+    ps = _plot_settings(ui)
+    points = _signal_points(state)
+    render_signal_plot!(
+        ctx, w, h, points;
+        xaxis=ps.xaxis, yaxis=ps.yaxis, zaxis=ps.zaxis, mode=ps.mode, log_scale=ps.log_scale,
+    )
     Gtk.draw(canvas)
     return nothing
 end
@@ -290,10 +173,10 @@ function _render_raw_canvas!(canvas, state::AppState)
     ctx === nothing && return nothing
     w = Float64(Gtk.width(canvas))
     h = Float64(Gtk.height(canvas))
-
-    xs = collect(1.0:1.0:length(state.current_raw))
-    ys = state.current_raw
-    _draw_polyline!(ctx, xs, ys, w, h; color=(0.62, 0.19, 0.08), title="raw camera data")
+    render_signal_plot!(
+        ctx, w, h, _raw_points(state);
+        xaxis=:idx, yaxis=:value, mode=:line, zaxis=:value, log_scale=false, title="raw camera data",
+    )
     Gtk.draw(canvas)
     return nothing
 end
@@ -308,7 +191,8 @@ function render!(ui::GtkApp, state::AppState)
     Gtk.set_gtk_property!(ui.file_label, :label, file_lbl)
     Gtk.set_gtk_property!(ui.dir_label, :label, "dir: $(state.app_config.dir)")
 
-    _render_signal_canvas!(ui.canvas_signal, state)
+    _update_plot_controls!(ui)
+    _render_signal_canvas!(ui, state)
     _render_raw_canvas!(ui.canvas_raw, state)
     return nothing
 end
@@ -379,6 +263,37 @@ function start_gtk_ui!(
     push!(controls, save_dat_btn)
     push!(controls, save_png_btn)
 
+    xbox = Gtk.ComboBoxText()
+    ybox = Gtk.ComboBoxText()
+    zbox = Gtk.ComboBoxText()
+    mode_box = Gtk.ComboBoxText()
+    log_cb = Gtk.CheckButton("Log10")
+    axis_choices = String.(DEFAULT_AXIS_CHOICES)
+    for c in axis_choices
+        push!(xbox, c)
+        push!(ybox, c)
+        push!(zbox, c)
+    end
+    for m in ("line", "polar", "heatmap")
+        push!(mode_box, m)
+    end
+    _set_combo_active!(xbox, axis_choices, "wl")
+    _set_combo_active!(ybox, axis_choices, "sig")
+    _set_combo_active!(zbox, axis_choices, "sig")
+    Gtk.set_gtk_property!(mode_box, :active, 0)
+    Gtk.set_gtk_property!(log_cb, :active, false)
+
+    plot_controls = Gtk.Box(:h, 8)
+    push!(plot_controls, Gtk.Label("plot X"))
+    push!(plot_controls, xbox)
+    push!(plot_controls, Gtk.Label("plot Y"))
+    push!(plot_controls, ybox)
+    push!(plot_controls, Gtk.Label("plot C"))
+    push!(plot_controls, zbox)
+    push!(plot_controls, Gtk.Label("mode"))
+    push!(plot_controls, mode_box)
+    push!(plot_controls, log_cb)
+
     canvas_signal = Gtk.GtkCanvas(100, 100)
     canvas_raw = Gtk.GtkCanvas(100, 100)
     paned = Gtk.Paned(:h)
@@ -393,10 +308,16 @@ function start_gtk_ui!(
     push!(root, header)
     push!(root, controls)
     push!(root, form)
+    push!(root, plot_controls)
     push!(root, paned)
     push!(win, root)
 
-    ui = GtkApp(win, entries, status_label, device_label, power_label, points_label, file_label, dir_label, canvas_signal, canvas_raw)
+    ui = GtkApp(
+        win, entries,
+        status_label, device_label, power_label, points_label, file_label, dir_label,
+        xbox, ybox, zbox, mode_box, log_cb,
+        canvas_signal, canvas_raw,
+    )
 
     function _emit_lifecycle_from_status(status_map::Dict{Symbol,NamedTuple{(:connected,:initialized,:healthy),Tuple{Bool,Bool,Bool}}})
         connected = !isempty(status_map) && all(v -> v.connected, values(status_map))
@@ -419,6 +340,18 @@ function start_gtk_ui!(
             put!(event_ch, SetDeviceLifecycle(false, false, "devices: lifecycle error"))
             @warn "Failed to read device lifecycle status" exception=(ex, catch_backtrace())
         end
+        return nothing
+    end
+
+    for widget in (xbox, ybox, zbox, mode_box)
+        Gtk.signal_connect(widget, "changed") do _
+            _update_plot_controls!(ui)
+            render!(ui, state)
+            return nothing
+        end
+    end
+    Gtk.signal_connect(log_cb, "toggled") do _
+        render!(ui, state)
         return nothing
     end
 
@@ -497,18 +430,39 @@ function start_gtk_ui!(
     end
 
     Gtk.signal_connect(save_dat_btn, "clicked") do _
-        state.current_spectrum === nothing && return nothing
+        pts = _signal_points(state)
+        isempty(pts) && return nothing
         path = Gtk.save_dialog("Save spectrum .dat", win)
         path === nothing && return nothing
-        save_spectrum_dat(path, state.current_spectrum; params=Dict{Symbol,Any}(:points => length(state.points)))
+        ps = _plot_settings(ui)
+        save_plot_dat(
+            path,
+            pts;
+            xaxis=ps.xaxis,
+            yaxis=ps.yaxis,
+            zaxis=ps.zaxis,
+            mode=ps.mode,
+            log_scale=ps.log_scale,
+            params=Dict{Symbol,Any}(:points => length(pts)),
+        )
         return nothing
     end
 
     Gtk.signal_connect(save_png_btn, "clicked") do _
-        state.current_spectrum === nothing && return nothing
+        pts = _signal_points(state)
+        isempty(pts) && return nothing
         path = Gtk.save_dialog("Save spectrum .png", win)
         path === nothing && return nothing
-        save_spectrum_png(path, state.current_spectrum; title="spectrum")
+        ps = _plot_settings(ui)
+        save_plot_png(
+            path,
+            pts;
+            xaxis=ps.xaxis,
+            yaxis=ps.yaxis,
+            zaxis=ps.zaxis,
+            mode=ps.mode,
+            log_scale=ps.log_scale,
+        )
         return nothing
     end
 
@@ -523,6 +477,7 @@ function start_gtk_ui!(
     end
 
     Gtk.showall(win)
+    _update_plot_controls!(ui)
     _refresh_lifecycle!()
 
     @async begin
