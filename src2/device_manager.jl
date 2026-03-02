@@ -1,6 +1,6 @@
 module DeviceManager
 
-export DeviceHub, RawDevice, MockDevice
+export DeviceHub, RawDevice, MockDevice, MockCamDevice
 export DeviceCommand, SetParameter, ReadSignal, ShutdownDevice
 export device_loop, SystemEvent, DeviceError
 
@@ -85,6 +85,16 @@ MockDevice() = RawDevice(
     () -> Dict(),
     (dev, name, value) -> :ok,
     (dev, name) -> rand(),
+    dev -> nothing,
+    1.0,
+    Channel{DeviceCommand}(32),
+    Channel{SystemEvent}(32)
+)
+
+MockCamDevice() = RawDevice(
+    () -> Dict(),
+    (dev, name, value) -> :ok,
+    (dev, name) -> randn(1024),
     dev -> nothing,
     1.0,
     Channel{DeviceCommand}(32),

@@ -34,12 +34,15 @@ mutable struct AppState
     raw_params::Vector{Pair{Symbol,String}}
     scan_params::Union{Nothing,ScanAxisSet}
     current_spectrum::Union{Nothing,Spectrum}
+    points::Vector{Point}
+    current_raw::Vector{Float64}
     current_power::Float64
+    last_saved_file::Union{Nothing,String}
 
     app_config::AppConfig
 
     function AppState()
-        new(Idle, Off, Pair{Symbol,String}[], nothing, nothing, 0.0, AppConfig("."))
+        new(Idle, Off, Pair{Symbol,String}[], nothing, nothing, Point[], Float64[], 0.0, nothing, AppConfig("."))
     end
 end
 

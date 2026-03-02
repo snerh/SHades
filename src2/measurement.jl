@@ -6,19 +6,30 @@ using ..Parameters
 using ..DeviceManager
 
 export MeasurementCommand, StartMeasurement, StopMeasurement, ShutdownMeasurement
-export measurement_loop, MeasurementStep, MeasurementDone, MeasurementStopped
+export measurement_loop, MeasurementStarted, MeasurementStep, MeasurementDone, MeasurementStopped
 
 abstract type MeasurementCommand end
 
 struct StartMeasurement <: MeasurementCommand
     params::ScanAxisSet
+    output_dir::Union{Nothing,String}
 end
+StartMeasurement(params::ScanAxisSet) = StartMeasurement(params, nothing)
 
 struct StopMeasurement <: MeasurementCommand end
 struct ShutdownMeasurement <: MeasurementCommand end
 
+struct MeasurementStarted <: SystemEvent
+    output_dir::Union{Nothing,String}
+end
+
 struct MeasurementStep <: SystemEvent
+    index::Int
+    point::Point
+    raw::Vector{Float64}
     spectrum::Spectrum
+    file_path::Union{Nothing,String}
+    reused::Bool
 end
 
 struct MeasurementDone <: SystemEvent end
@@ -60,6 +71,42 @@ function _to_float_vector(x)
         return [Float64(x)]
     end
     return Float64.(collect(x))
+end
+
+_fname_atom(v) = replace(string(v), r"[^0-9A-Za-z._-]+" => "_")
+
+function _encode_header(params::Dict{Symbol,Any})
+    chunks = String[]
+    for (k, v) in sort(collect(params); by=first)
+        push!(chunks, "$(String(k))=$(repr(v))")
+    end
+    return join(chunks, ";")
+end
+
+function _save_raw_file(path::AbstractString, params::Dict{Symbol,Any}, data::Vector{Float64})
+    open(path, "w") do io
+        println(io, "# ", _encode_header(params))
+        for y in data
+            println(io, y)
+        end
+    end
+    return path
+end
+
+function _load_raw_file(path::AbstractString)
+    data = Float64[]
+    open(path, "r") do io
+        for line in eachline(io)
+            s = strip(line)
+            isempty(s) && continue
+            startswith(s, "#") && continue
+            try
+                push!(data, parse(Float64, s))
+            catch
+            end
+        end
+    end
+    return data
 end
 
 function _as_seconds(v)
@@ -134,9 +181,19 @@ function _capture_background!(manager, p::Dict{Symbol,Any})
     return back
 end
 
-function _walk_axes_measurement!(axes::Vector{ScanAxis}, i::Int, body::Function, stop_requested, p::Dict{Symbol,Any}=Dict{Symbol,Any}())
+function _walk_axes_measurement!(
+    axes::Vector{ScanAxis},
+    i::Int,
+    body::Function,
+    stop_requested,
+    p::Dict{Symbol,Any}=Dict{Symbol,Any}(),
+    stem::String=""
+)
     stop_requested[] && return :stop
-    i > length(axes) && return body(copy(p))
+    if i > length(axes)
+        file_stem = isempty(stem) ? "point" : (endswith(stem, "_") ? stem[1:end-1] : stem)
+        return body(copy(p), file_stem)
+    end
 
     ax = axes[i]
     name = axis_name(ax)
@@ -145,7 +202,8 @@ function _walk_axes_measurement!(axes::Vector{ScanAxis}, i::Int, body::Function,
         for el in ax.values
             stop_requested[] && return :stop
             p[name] = el
-            res = _walk_axes_measurement!(axes, i + 1, body, stop_requested, p)
+            chunk = "$(name)_$(_fname_atom(el))_"
+            res = _walk_axes_measurement!(axes, i + 1, body, stop_requested, p, stem * chunk)
             res == :stop && return :stop
         end
         return :continue
@@ -153,22 +211,23 @@ function _walk_axes_measurement!(axes::Vector{ScanAxis}, i::Int, body::Function,
         for el in collect(ax.range)
             stop_requested[] && return :stop
             p[name] = el
-            res = _walk_axes_measurement!(axes, i + 1, body, stop_requested, p)
+            chunk = "$(name)_$(_fname_atom(el))_"
+            res = _walk_axes_measurement!(axes, i + 1, body, stop_requested, p, stem * chunk)
             res == :stop && return :stop
         end
         return :continue
     elseif ax isa FixedAxis
         p[name] = ax.value
-        return _walk_axes_measurement!(axes, i + 1, body, stop_requested, p)
+        return _walk_axes_measurement!(axes, i + 1, body, stop_requested, p, stem)
     elseif ax isa DependentAxis
         haskey(p, ax.depends_on) || error("DependentAxis $(ax.name) depends on missing $(ax.depends_on)")
         p[name] = ax.f(p[ax.depends_on])
-        return _walk_axes_measurement!(axes, i + 1, body, stop_requested, p)
+        return _walk_axes_measurement!(axes, i + 1, body, stop_requested, p, stem)
     elseif ax isa MultiDependentAxis
         vals = map(dep -> get(p, dep, nothing), ax.depends_on)
         any(isnothing, vals) && error("MultiDependentAxis $(ax.name) has missing dependency")
         p[name] = ax.f(vals...)
-        return _walk_axes_measurement!(axes, i + 1, body, stop_requested, p)
+        return _walk_axes_measurement!(axes, i + 1, body, stop_requested, p, stem)
     elseif ax isa LoopAxis
         ax.step == 0 && error("LoopAxis step cannot be 0")
         v = ax.start
@@ -180,22 +239,22 @@ function _walk_axes_measurement!(axes::Vector{ScanAxis}, i::Int, body::Function,
                 end
             end
             p[name] = v
-            res = _walk_axes_measurement!(axes, i + 1, body, stop_requested, p)
+            chunk = "$(name)_$(_fname_atom(v))_"
+            res = _walk_axes_measurement!(axes, i + 1, body, stop_requested, p, stem * chunk)
             res == :stop && return :stop
             v += ax.step
         end
     end
 
-    return _walk_axes_measurement!(axes, i + 1, body, stop_requested, p)
+    return _walk_axes_measurement!(axes, i + 1, body, stop_requested, p, stem)
 end
 
 function _first_point(scan_axes::ScanAxisSet)
     firstp = Ref{Union{Nothing,Dict{Symbol,Any}}}(nothing)
-    res = _walk_axes_measurement!(scan_axes.axes, 1, p -> begin
+    _walk_axes_measurement!(scan_axes.axes, 1, (p, _stem) -> begin
         firstp[] = p
         return :stop
     end, Ref(false))
-    res
     return something(firstp[], Dict{Symbol,Any}())
 end
 
@@ -223,33 +282,78 @@ function _point_wl(p::Dict{Symbol,Any}, fallback::Int)
     return Float64(fallback)
 end
 
-function _measurement_step!(event_ch, manager, ctx::MeasurementContext, point::Dict{Symbol,Any}, step_index::Int)
+function _measurement_step!(
+    event_ch,
+    manager,
+    ctx::MeasurementContext,
+    point::Dict{Symbol,Any},
+    step_index::Int;
+    output_dir::Union{Nothing,String}=nothing,
+    stem::String="point"
+)
     p = copy(point)
     _normalize_params!(p)
     ctx.oldp = _apply_new_params!(ctx.oldp, p, manager)
 
-    delay_s = Float64(get(p, :delay_s, 1.5))
-    delay_s > 0 && sleep(delay_s)
+    file_path = output_dir === nothing ? nothing : joinpath(output_dir, "$(stem).dat")
+    reused = false
+    data = Float64[]
 
-    data = _acquire_with_back(manager, p, ctx.back)
-    sig = maximum(data) - median(data)
+    if file_path !== nothing && isfile(file_path)
+        data = _load_raw_file(file_path)
+        reused = true
+    else
+        delay_s = Float64(get(p, :delay_s, 1.5))
+        delay_s > 0 && sleep(delay_s)
+        data = _acquire_with_back(manager, p, ctx.back)
+    end
+
+    sig = isempty(data) ? NaN : maximum(data) - median(data)
     wl = _point_wl(p, step_index)
+    t_s = _as_seconds(get(p, :acq_time, get(p, :time_s, 0.1)))
+    real_power = try
+        Float64(_read_signal(manager, :pd, :power))
+    catch
+        NaN
+    end
+
+    point_payload = copy(p)
+    point_payload[:wl] = wl
+    point_payload[:time_s] = t_s
+    point_payload[:real_power] = real_power
+    point_payload[:sig] = sig
+
+    if !reused && file_path !== nothing
+        _save_raw_file(file_path, point_payload, data)
+    end
 
     push!(ctx.wls, wl)
     push!(ctx.sigs, sig)
-    put!(event_ch, MeasurementStep(Spectrum(copy(ctx.wls), copy(ctx.sigs))))
+    put!(
+        event_ch,
+        MeasurementStep(
+            step_index,
+            point_payload,
+            copy(data),
+            Spectrum(copy(ctx.wls), copy(ctx.sigs)),
+            file_path,
+            reused,
+        )
+    )
 
     return nothing
 end
 
-function _run_measurement!(event_ch, manager, scan_axes::ScanAxisSet, stop_requested)
+function _run_measurement!(event_ch, manager, scan_axes::ScanAxisSet, output_dir::Union{Nothing,String}, stop_requested)
     ctx = _measurement_start!(manager, scan_axes)
     step_index = Ref(0)
+    output_dir !== nothing && mkpath(output_dir)
+    put!(event_ch, MeasurementStarted(output_dir))
 
-    body = function (p::Dict{Symbol,Any})
+    body = function (p::Dict{Symbol,Any}, stem::String)
         stop_requested[] && return :stop
         step_index[] += 1
-        _measurement_step!(event_ch, manager, ctx, p, step_index[])
+        _measurement_step!(event_ch, manager, ctx, p, step_index[]; output_dir=output_dir, stem=stem)
         return :continue
     end
 
@@ -279,7 +383,7 @@ function measurement_loop(cmd_ch, event_ch, manager)
                 stop_requested = Ref(false)
                 running_task = @async begin
                     try
-                        _run_measurement!(event_ch, manager, cmd.params, stop_requested)
+                        _run_measurement!(event_ch, manager, cmd.params, cmd.output_dir, stop_requested)
                     catch ex
                         put!(event_ch, DeviceError("Measurement loop failed: $(sprint(showerror, ex))"))
                     end

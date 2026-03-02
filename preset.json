@@ -1,1 +1,1 @@
-{"wl":"500:10:600","sol_wl":"500:10:600","inter":"IDL","polarizer":"0","analyzer":"=:polarizer+90","acq_time":"100","cam_temp":"-10","frames":"2"}
+{"wl":"500:5:750","sol_wl":"=round(wl/40)*20","inter":"IDL","polarizer":"90","analyzer":"=polarizer+90","acq_time":"100","cam_temp":"-10","frames":"2"}

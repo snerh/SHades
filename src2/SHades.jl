@@ -28,7 +28,7 @@ export start_gtk_ui!
 
 mutable struct AppRuntime
     state::AppState
-    device::RawDevice
+    devices::Vector{RawDevice}
     device_hub::DeviceHub
     meas_cmd::Channel{MeasurementCommand}
     power_cmd::Channel{PowerCommand}
@@ -51,14 +51,16 @@ function run()
     ui_cmd = Channel{Nothing}(16)
 
     md = MockDevice()
+    md_cam = MockCamDevice()
     device_hub = DeviceHub(Dict(
         :laser => md.device_cmd,
         :spec => md.device_cmd,
         :ell => md.device_cmd,
-        :cam => md.device_cmd,
+        :cam => md_cam.device_cmd,
         :pd => md.device_cmd,
     ))
     t_device = @async device_loop(md) ## тут должны быть все приборы, пока заглушка с одним
+    t_device_cam = @async device_loop(md_cam)
     t_measure = @async measurement_loop(meas_cmd, meas_events, device_hub)
     t_power = @async power_loop(power_cmd, power_events, device_hub)
 
@@ -68,12 +70,14 @@ function run()
     t_fwd_meas = @async forward(meas_events, event_bus)
     t_fwd_power = @async forward(power_events, event_bus)
     t_fwd_dev = @async forward(md.device_events, event_bus)
+    t_fwd_dev_cam = @async forward(md_cam.device_events, event_bus)
     t_fwd_ui = @async forward(ui_events, event_bus)
 
     t_bus_closer = @async begin
         wait(t_fwd_meas)
         wait(t_fwd_power)
         wait(t_fwd_dev)
+        wait(t_fwd_dev_cam)
         wait(t_fwd_ui)
         close(event_bus)
     end
@@ -81,13 +85,17 @@ function run()
     # UI event pump (Gtk должен вызывать reduce! из main thread)
     t_reducer = @async begin
         for ev in event_bus
-            reduce!(state, ev)
-            put!(ui_cmd, nothing)
+            try
+                reduce!(state, ev)
+                _notify_ui!(ui_cmd)
+            catch ex
+                @warn "Reducer failed on event" event_type=string(typeof(ev)) exception=(ex, catch_backtrace())
+            end
         end
     end
 
-    tasks = Task[t_device, t_measure, t_power, t_fwd_meas, t_fwd_power, t_fwd_dev, t_fwd_ui, t_bus_closer, t_reducer]
-    return AppRuntime(state, md, device_hub, meas_cmd, power_cmd, ui_events, ui_cmd, tasks)
+    tasks = Task[t_device, t_device_cam, t_measure, t_power, t_fwd_meas, t_fwd_power, t_fwd_dev, t_fwd_dev_cam, t_fwd_ui, t_bus_closer, t_reducer]
+    return AppRuntime(state, RawDevice[md, md_cam], device_hub, meas_cmd, power_cmd, ui_events, ui_cmd, tasks)
 end
 
 function forward(src, dst)
@@ -112,15 +120,33 @@ function _close_if_open!(ch)
     return nothing
 end
 
+function _notify_ui!(ui_cmd::Channel{Nothing})
+    isopen(ui_cmd) || return nothing
+
+    # Coalesce repaint signals so reducer never blocks.
+    if !isready(ui_cmd)
+        try
+            put!(ui_cmd, nothing)
+        catch ex
+            ex isa InvalidStateException || rethrow(ex)
+        end
+    end
+    return nothing
+end
+
 function stop!(runtime::AppRuntime; timeout_s::Float64=2.0)
     _put_if_open!(runtime.meas_cmd, ShutdownMeasurement())
     _put_if_open!(runtime.power_cmd, ShutdownPower())
-    _put_if_open!(runtime.device.device_cmd, ShutdownDevice())
+    for dev in runtime.devices
+        _put_if_open!(dev.device_cmd, ShutdownDevice())
+    end
 
     _close_if_open!(runtime.meas_cmd)
     _close_if_open!(runtime.power_cmd)
     _close_if_open!(runtime.ui_events)
-    _close_if_open!(runtime.device.device_cmd)
+    for dev in runtime.devices
+        _close_if_open!(dev.device_cmd)
+    end
 
     for t in runtime.tasks
         timedwait(() -> istaskdone(t), timeout_s)
@@ -128,7 +154,8 @@ function stop!(runtime::AppRuntime; timeout_s::Float64=2.0)
     return runtime.state
 end
 
-start_measurement!(runtime::AppRuntime, params::ScanAxisSet) = put!(runtime.meas_cmd, StartMeasurement(params))
+start_measurement!(runtime::AppRuntime, params::ScanAxisSet; output_dir::Union{Nothing,String}=nothing) =
+    put!(runtime.meas_cmd, StartMeasurement(params, output_dir))
 stop_measurement!(runtime::AppRuntime) = put!(runtime.meas_cmd, StopMeasurement())
 
 start_power_stabilization!(runtime::AppRuntime) = put!(runtime.power_cmd, StartStab())
@@ -136,6 +163,14 @@ stop_power_stabilization!(runtime::AppRuntime) = put!(runtime.power_cmd, StopSta
 set_target_power!(runtime::AppRuntime, value::Real) = put!(runtime.power_cmd, SetTargetPower(Float64(value)))
 
 start_gtk_ui!(runtime::AppRuntime; config_path::AbstractString="preset.json", title::AbstractString="SHades2.0") =
-    GtkUI.start_gtk_ui!(runtime.state, runtime.ui_events, runtime.ui_cmd; config_path=config_path, title=title)
+    GtkUI.start_gtk_ui!(
+        runtime.state,
+        runtime.ui_events,
+        runtime.ui_cmd,
+        runtime.meas_cmd,
+        runtime.power_cmd;
+        config_path=config_path,
+        title=title,
+    )
 
 end

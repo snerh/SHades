@@ -57,7 +57,7 @@ function _collect_deps!(acc::Set{Symbol}, ex)
             error("Expression node '$(ex.head)' is not allowed")
         end
     elseif !(ex isa Number)
-        error("Unsupported expression element: $(typeof(ex))")
+        error("Unsupported expression element: $(typeof(ex)) ($(ex))")
     end
     return acc
 end
