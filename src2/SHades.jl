@@ -135,7 +135,7 @@ start_power_stabilization!(runtime::AppRuntime) = put!(runtime.power_cmd, StartS
 stop_power_stabilization!(runtime::AppRuntime) = put!(runtime.power_cmd, StopStab())
 set_target_power!(runtime::AppRuntime, value::Real) = put!(runtime.power_cmd, SetTargetPower(Float64(value)))
 
-start_gtk_ui!(runtime::AppRuntime; config_path::AbstractString="preset.toml", title::AbstractString="SHades2.0") =
+start_gtk_ui!(runtime::AppRuntime; config_path::AbstractString="preset.json", title::AbstractString="SHades2.0") =
     GtkUI.start_gtk_ui!(runtime.state, runtime.ui_events, runtime.ui_cmd; config_path=config_path, title=title)
 
 end

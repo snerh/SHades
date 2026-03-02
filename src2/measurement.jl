@@ -141,8 +141,16 @@ function _walk_axes_measurement!(axes::Vector{ScanAxis}, i::Int, body::Function,
     ax = axes[i]
     name = axis_name(ax)
 
-    if ax isa IndependentAxis
+    if ax isa ListAxis
         for el in ax.values
+            stop_requested[] && return :stop
+            p[name] = el
+            res = _walk_axes_measurement!(axes, i + 1, body, stop_requested, p)
+            res == :stop && return :stop
+        end
+        return :continue
+    elseif ax isa RangeAxis
+        for el in collect(ax.range)
             stop_requested[] && return :stop
             p[name] = el
             res = _walk_axes_measurement!(axes, i + 1, body, stop_requested, p)

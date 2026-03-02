@@ -1,0 +1,24 @@
+{"ell":
+	{
+		"power":
+		{
+			"address": 1,
+			"home": 33.6
+		},
+		"polarizer":
+		{
+			"address": 0,
+			"home": 129.8
+		},
+		"analyzer":
+		{
+			"address": 2,
+			"home":10
+		
+		}
+	},
+"orpheus":{
+	"test": 1
+	}
+}
+

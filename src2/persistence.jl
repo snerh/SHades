@@ -1,51 +1,47 @@
 module Persistence
 
-using TOML
+using JSON
 using ..Parameters
 
 export save_config, load_config
 
-function save_config(path, params::ScanAxisSet)
-
-    dict = Dict{String,Any}()
-
-    for (k,v) in axes_dict(params)
-        dict[string(k)] = axis_to_dict(v)
-    end
-
-    open(path, "w") do io
-        TOML.print(io, Dict("scan" => dict))
-    end
+function save_config(path, params::Vector{Pair{Symbol, String}})
+    json = JSON.json(params)
+    #Log.printlog(json)
+    io = open(path, "w")
+    write(io, json)
+    #Log.printlog("writing state file")
+    close(io)
 end
-
 function load_config(path)
-    data = TOML.parsefile(path)
-    specs = Dict{Symbol,ScanAxis}()
-
-    for (k,tbl) in data["scan"]
-        specs[Symbol(k)] = load_spec(Symbol(k), tbl)
+    try        
+        io = open(path,"r")
+        s = readline(io)
+        dicts = JSON.Parser.parse(s,dicttype=Dict{Symbol,Any})
+        println(dicts)
+        function dict_to_pair(d)
+            k = collect(keys(d))[1]
+            k => d[k]
+        end
+        raw_params = map(dict_to_pair, dicts)
+        println(raw_params)
+		#Log.printlog("\n=========text_state=============")
+		#Log.printlog(raw_params)
+        close(io)
+        raw_param
+    catch
+        @warn "No backup file"
+        [
+            :wl => "500:10:600",
+            :sol_wl => "500",
+            :inter => "IDL",
+            :polarizer => "0",
+            :analyzer => "0",
+            :acq_time => "100",
+            :cam_temp => "-10",
+            :frames => "2",
+        ]
     end
-
-    return ScanAxisSet(collect(values(specs)))
 end
-
-function load_spec(name::Symbol, tbl)
-    t = tbl["type"]
-    if t == "fixed"
-        FixedAxis(name, tbl["value"])
-    elseif t == "list"
-        IndependentAxis(name, tbl["values"])
-    elseif t == "loop"
-        LoopAxis(name=name, start=tbl["start"], step=tbl["step"], stop=tbl["stop"])
-    else
-        error("Unknown spec")
-    end
-end
-
-axis_to_dict(p::FixedAxis) = Dict("type"=>"fixed","value"=>p.value)
-axis_to_dict(p::IndependentAxis) =
-    Dict("type"=>"list","values"=>p.values)
-axis_to_dict(p::LoopAxis) =
-    Dict("type"=>"loop","start"=>p.start,"stop"=>p.stop,"step"=>p.step)
 
 end

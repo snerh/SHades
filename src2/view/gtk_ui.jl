@@ -1,22 +1,14 @@
 module GtkUI
 
+import Gtk
+
 using ..State
 using ..Parameters
 using ..Persistence
 using ..ParameterParser
 using ..DeviceManager: SystemEvent
 
-export SetParam, AxisEntry, GtkApp, start_gtk_ui!, render!
-
-const _gtk_mod = Ref{Any}(nothing)
-
-function _gtk()
-    if _gtk_mod[] === nothing
-        @eval import Gtk
-        _gtk_mod[] = Gtk
-    end
-    return _gtk_mod[]
-end
+export SetParam, AxisEntry, GtkApp, start_gtk_ui!, render!, test_gtk
 
 struct SetParam <: SystemEvent
     name::Symbol
@@ -37,7 +29,7 @@ mutable struct GtkApp
 end
 
 function AxisEntry(name::Symbol, event_ch, init_str::AbstractString)
-    gtk = _gtk()
+    gtk = Gtk
     entry = gtk.Entry()
     gtk.set_gtk_property!(entry, :text, String(init_str))
 
@@ -55,8 +47,10 @@ end
 function _axis_to_text(ax::ScanAxis)
     if ax isa FixedAxis
         return string(ax.value)
-    elseif ax isa IndependentAxis
+    elseif ax isa ListAxis
         return join(string.(ax.values), ",")
+    elseif ax isa RangeAxis
+        return "$(ax.range[1]):$(step(ax.range)):$(ax.range[end])"
     elseif ax isa LoopAxis
         if ax.stop === nothing
             return "$(ax.start):$(ax.step)"
@@ -75,17 +69,16 @@ function _raw_params_from_plan(plan::ScanAxisSet)
 end
 
 function render!(ui::GtkApp, state::AppState)
-    gtk = _gtk()
     points = state.current_spectrum === nothing ? 0 : length(state.current_spectrum.wavelength)
-    gtk.set_gtk_property!(ui.status_label, :label, "measurement: $(state.measurement_state)")
-    gtk.set_gtk_property!(ui.power_label, :label, "power: $(round(state.current_power; digits=4))")
-    gtk.set_gtk_property!(ui.points_label, :label, "points: $(points)")
+    Gtk.set_gtk_property!(ui.status_label, :label, "measurement: $(state.measurement_state)")
+    Gtk.set_gtk_property!(ui.power_label, :label, "power: $(round(state.current_power; digits=4))")
+    Gtk.set_gtk_property!(ui.points_label, :label, "points: $(points)")
     return nothing
 end
 
 function _build_form_box(raw_params::Vector{Pair{Symbol,String}}, event_ch)
-    gtk = _gtk()
-    form = gtk.Box(:v, 6)
+    gtk = Gtk
+    form = gtk.Box(:v, 10)
     entries = Dict{Symbol,AxisEntry}()
 
     for (name, value) in raw_params
@@ -100,46 +93,83 @@ function _build_form_box(raw_params::Vector{Pair{Symbol,String}}, event_ch)
     return form, entries
 end
 
-function start_gtk_ui!(state::AppState, event_ch, ui_channel; config_path::AbstractString="preset.toml", title::AbstractString="SHades2.0")
-    gtk = _gtk()
-    GLib = gtk.GLib
+function start_gtk_ui!(state::AppState, event_ch, ui_channel; config_path::AbstractString="./preset2.json", title::AbstractString="SHades2.0")
+    raw_p = load_config(config_path)
+    state.raw_params = raw_p 
+    state.scan_params = build_scan_axis_set_from_text_specs(raw_p)
 
-    plan = load_config(config_path)
-    raw_params = _raw_params_from_plan(plan)
-    state.raw_params = raw_params
-    state.scan_params = build_scan_axis_set_from_text_specs(raw_params)
+    win = Gtk.Window(String(title), 720, 520)
+    root = Gtk.Box(:v, 10)
 
-    win = gtk.Window(String(title), 720, 520)
-    root = gtk.Box(:v, 10)
+    status_label = Gtk.Label("measurement: $(state.measurement_state)")
+    power_label = Gtk.Label("power: $(state.current_power)")
+    points_label = Gtk.Label("points: 0")
 
-    status_label = gtk.Label("measurement: $(state.measurement_state)")
-    power_label = gtk.Label("power: $(state.current_power)")
-    points_label = gtk.Label("points: 0")
-
-    header = gtk.Box(:v, 4)
+    header = Gtk.Box(:v, 4)
     push!(header, status_label)
     push!(header, power_label)
     push!(header, points_label)
 
-    form, entries = _build_form_box(raw_params, event_ch)
-
+    form, entries = _build_form_box(raw_p, event_ch)
+    #println(form)
+    #println(entries)
+    #form = Gtk.Button("testste")
     push!(root, header)
     push!(root, form)
     push!(win, root)
 
+    println("5")
     ui = GtkApp(win, entries, status_label, power_label, points_label)
 
-    GLib.idle_add() do
-        while isready(ui_channel)
-            take!(ui_channel)
-            render!(ui, state)
-        end
-        return true
+    println("4")
+    Gtk.signal_connect(win, "destroy") do _
+        println("Window destruction!")
+        save_config(config_path, state.raw_params)
+        Gtk.gtk_main_running[] && Gtk.gtk_quit()
+        return nothing
     end
 
+    Gtk.showall(win)
+    println("1")
+    function _on_mainloop(f::Function)
+        Gtk.GLib.g_idle_add(nothing) do _
+            f()
+            Cint(false)
+        end
+        return nothing
+    end
+    @async begin
+        for ui_cmd in ui_channel
+            _on_mainloop( () -> render!(ui,state))
+        end
+    end
+    #Gtk.g_idle_add(nothing) do _
+    #    while isready(ui_channel)
+    #        take!(ui_channel)
+    #        render!(ui, state)
+    #        println("2")
+    #    end
+    #    return true
+    #end
+
     render!(ui, state)
-    gtk.showall(win)
+    println("3")
+    Gtk.gtk_main()
+    println(6)
     return ui
+end
+
+function test_gtk()
+    win = Gtk.Window("test window", 720, 520)
+    Gtk.signal_connect(win, "destroy") do _
+        Gtk.gtk_main_running[] && Gtk.gtk_quit()
+        return nothing
+    end
+    button = Gtk.Button("123")
+    push!(win, button)
+    Gtk.showall(win)
+
+    Gtk.gtk_main()
 end
 
 end

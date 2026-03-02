@@ -1,9 +1,3 @@
-module ParameterParser
-
-using ..Parameters
-
-export parse_axis_spec, build_scan_axis_set_from_text_specs, build_scan_plan_from_text_specs
-
 const _SAFE_CONSTS = Dict{Symbol,Float64}(
     :pi => π,
     :e => ℯ,
@@ -90,7 +84,7 @@ function _make_numeric_values(start::Float64, step::Float64, stop::Float64)
     elseif start > stop && step > 0
         error("step must be < 0 for descending range")
     end
-    start:step:stop
+    collect(start:step:stop)
 end
 
 function _parse_numeric_axis(name::Symbol, spec::AbstractString)
@@ -99,7 +93,7 @@ function _parse_numeric_axis(name::Symbol, spec::AbstractString)
         a = _parse_num(m3.captures[1])
         b = _parse_num(m3.captures[2])
         c = _parse_num(m3.captures[3])
-        return RangeAxis(name, _make_numeric_values(a, b, c))
+        return IndependentAxis(name, _make_numeric_values(a, b, c))
     end
 
     m3dots = match(Regex("^\\s*($_NUM)\\s*\\.\\.\\s*($_NUM)\\s*\\.\\.\\s*($_NUM)\\s*\$"), spec)
@@ -107,7 +101,7 @@ function _parse_numeric_axis(name::Symbol, spec::AbstractString)
         a = _parse_num(m3dots.captures[1])
         b = _parse_num(m3dots.captures[2])
         c = _parse_num(m3dots.captures[3])
-        return RangeAxis(name, _make_numeric_values(a, c, b))
+        return IndependentAxis(name, _make_numeric_values(a, c, b))
     end
 
     m2 = match(Regex("^\\s*($_NUM)\\s*:\\s*($_NUM)\\s*\$"), spec)
@@ -115,7 +109,7 @@ function _parse_numeric_axis(name::Symbol, spec::AbstractString)
         a = _parse_num(m2.captures[1])
         b = _parse_num(m2.captures[2])
         step = a <= b ? 1.0 : -1.0
-        return RangeAxis(name, _make_numeric_values(a, step, b))
+        return IndependentAxis(name, _make_numeric_values(a, step, b))
     end
 
     m2dots = match(Regex("^\\s*($_NUM)\\s*\\.\\.\\s*($_NUM)\\s*\$"), spec)
@@ -123,12 +117,12 @@ function _parse_numeric_axis(name::Symbol, spec::AbstractString)
         a = _parse_num(m2dots.captures[1])
         b = _parse_num(m2dots.captures[2])
         step = a <= b ? 1.0 : -1.0
-        return RangeAxis(name, _make_numeric_values(a, step, b))
+        return IndependentAxis(name, _make_numeric_values(a, step, b))
     end
 
     if occursin(",", spec)
         vals = map(x -> _parse_num(x), split(spec, ","))
-        return ListAxis(name, vals)
+        return IndependentAxis(name, vals)
     end
 
     if occursin(Regex("^\\s*$_NUM\\s*\$"), spec)
@@ -138,7 +132,7 @@ function _parse_numeric_axis(name::Symbol, spec::AbstractString)
     return nothing
 end
 
-function parse_axis_spec(name::Symbol, raw_spec::AbstractString)
+function parse_axis_spec(name::Symbol, raw_spec::AbstractString; numeric_only::Bool=false)
     spec = strip(raw_spec)
     isempty(spec) && return nothing
 
@@ -168,6 +162,10 @@ function parse_axis_spec(name::Symbol, raw_spec::AbstractString)
     axis = _parse_numeric_axis(name, spec)
     axis !== nothing && return axis
 
+    if numeric_only
+        error("Axis '$name' expects numeric value/range/list, or dependent expression starting with '='")
+    end
+
     # Safe string literal mode for categorical fixed params.
     if startswith(spec, "\"") && endswith(spec, "\"")
         return FixedAxis(name, spec[2:end-1])
@@ -175,16 +173,77 @@ function parse_axis_spec(name::Symbol, raw_spec::AbstractString)
     return FixedAxis(name, spec)
 end
 
-function build_scan_axis_set_from_text_specs(specs::Vector{Pair{Symbol,String}}; fixed::AbstractVector{<:Pair}=Pair{Symbol,Any}[])
+function build_scan_plan_from_text_specs(
+    specs::Vector{Pair{Symbol,String}};
+    fixed::AbstractVector{<:Pair}=Pair{Symbol,Any}[],
+    numeric_axes::AbstractSet{Symbol}=Set{Symbol}(),
+)
     axes = ScanAxis[]
     for (name, spec) in specs
-        ax = parse_axis_spec(name, spec)
+        ax = parse_axis_spec(name, spec; numeric_only=(name in numeric_axes))
         ax === nothing || push!(axes, ax)
     end
     for (name, val) in fixed
         push!(axes, FixedAxis(name, val))
     end
-    return ScanAxisSet(axes)
+    return ScanPlan(axes)
 end
 
+function validate_scan_plan(plan::ScanPlan)
+    errors = Dict{Symbol,String}()
+    seen = Set{Symbol}()
+
+    for ax in plan.axes
+        name = axis_name(ax)
+        if name in seen
+            errors[name] = "Axis '$name' is defined more than once"
+            continue
+        end
+
+        if ax isa DependentAxis
+            if !(ax.depends_on in seen)
+                errors[name] = "Axis '$name' depends on '$(ax.depends_on)', but it is missing or defined later"
+            end
+        elseif ax isa MultiDependentAxis
+            missing = [d for d in ax.depends_on if !(d in seen)]
+            if !isempty(missing)
+                errors[name] = "Axis '$name' has missing/late dependencies: $(join(string.(missing), ", "))"
+            end
+        end
+
+        push!(seen, name)
+    end
+
+    return errors
+end
+
+function validate_scan_text_specs(
+    specs::Vector{Pair{Symbol,String}};
+    fixed::AbstractVector{<:Pair}=Pair{Symbol,Any}[],
+    numeric_axes::AbstractSet{Symbol}=Set{Symbol}(),
+)
+    errors = Dict{Symbol,String}()
+    axes = ScanAxis[]
+
+    for (name, spec) in specs
+        try
+            ax = parse_axis_spec(name, spec; numeric_only=(name in numeric_axes))
+            ax === nothing || push!(axes, ax)
+        catch e
+            errors[name] = sprint(showerror, e)
+        end
+    end
+
+    for (name, val) in fixed
+        push!(axes, FixedAxis(name, val))
+    end
+
+    plan = ScanPlan(axes)
+    merge!(errors, validate_scan_plan(plan))
+
+    return (
+        ok = isempty(errors),
+        plan = isempty(errors) ? plan : nothing,
+        errors = errors,
+    )
 end

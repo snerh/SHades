@@ -1,0 +1,4 @@
+cd("C:\\work\\soft\\SHades\\")
+pkg> activate .
+using PackageCompiler
+create_sysimage(["SHades"]; sysimage_path="SHades_sysimage.so", precompile_execution_file="precompile_app.jl")
