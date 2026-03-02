@@ -8,15 +8,22 @@ using ..State
 using ..Parameters
 using ..Persistence
 using ..ParameterParser
-using ..DeviceManager: SystemEvent
+using ..DeviceManager: SystemEvent, DeviceHub, connect_devices!, init_devices!, disconnect_devices!, devices_status
 using ..Measurement: MeasurementCommand, StartMeasurement, StopMeasurement
-using ..Power: PowerCommand, StartStab, StopStab, SetTargetPower
+using ..Power: PowerCommand, StartStab, StopStab
+using ..Processing: save_spectrum_dat, save_spectrum_png
 
 export SetParam, AxisEntry, GtkApp, start_gtk_ui!, render!, test_gtk
 
 struct SetParam <: SystemEvent
     name::Symbol
     val::String
+end
+
+struct SetDeviceLifecycle <: SystemEvent
+    connected::Bool
+    initialized::Bool
+    message::String
 end
 
 mutable struct AxisEntry
@@ -28,9 +35,11 @@ mutable struct GtkApp
     win::Any
     entries::Dict{Symbol,AxisEntry}
     status_label::Any
+    device_label::Any
     power_label::Any
     points_label::Any
     file_label::Any
+    dir_label::Any
     canvas_signal::Any
     canvas_raw::Any
 end
@@ -292,10 +301,12 @@ end
 function render!(ui::GtkApp, state::AppState)
     points = length(state.points)
     Gtk.set_gtk_property!(ui.status_label, :label, "measurement: $(state.measurement_state)")
+    Gtk.set_gtk_property!(ui.device_label, :label, state.device_status)
     Gtk.set_gtk_property!(ui.power_label, :label, "power: $(round(state.current_power; digits=4))")
     Gtk.set_gtk_property!(ui.points_label, :label, "points: $(points)")
     file_lbl = state.last_saved_file === nothing ? "saved: -" : "saved: $(basename(state.last_saved_file))"
     Gtk.set_gtk_property!(ui.file_label, :label, file_lbl)
+    Gtk.set_gtk_property!(ui.dir_label, :label, "dir: $(state.app_config.dir)")
 
     _render_signal_canvas!(ui.canvas_signal, state)
     _render_raw_canvas!(ui.canvas_raw, state)
@@ -319,7 +330,8 @@ function start_gtk_ui!(
     event_ch,
     ui_channel,
     meas_cmd::Channel{MeasurementCommand},
-    power_cmd::Channel{PowerCommand};
+    power_cmd::Channel{PowerCommand},
+    device_hub::DeviceHub;
     config_path::AbstractString="preset.json",
     title::AbstractString="SHades2.0",
 )
@@ -331,37 +343,41 @@ function start_gtk_ui!(
     root = Gtk.Box(:v, 10)
 
     status_label = Gtk.Label("measurement: $(state.measurement_state)")
+    device_label = Gtk.Label(state.device_status)
     power_label = Gtk.Label("power: $(state.current_power)")
     points_label = Gtk.Label("points: 0")
     file_label = Gtk.Label("saved: -")
+    dir_label = Gtk.Label("dir: $(state.app_config.dir)")
     header = Gtk.Box(:v, 4)
     push!(header, status_label)
+    push!(header, device_label)
     push!(header, power_label)
     push!(header, points_label)
     push!(header, file_label)
+    push!(header, dir_label)
 
     form, entries = _build_form_box(raw_p, event_ch)
 
-    dir_entry = Gtk.Entry()
-    Gtk.set_gtk_property!(dir_entry, :text, state.app_config.dir)
-    target_entry = Gtk.Entry()
-    Gtk.set_gtk_property!(target_entry, :text, "1.0")
-
+    connect_btn = Gtk.Button("Connect")
+    init_btn = Gtk.Button("Init")
+    disconnect_btn = Gtk.Button("Disconnect")
     pick_dir_btn = Gtk.Button("Dir")
     scan_btn = Gtk.Button("Scan")
     stop_btn = Gtk.Button("Stop")
     power_btn = Gtk.ToggleButton("Power stab")
-    target_btn = Gtk.Button("Set power")
+    save_dat_btn = Gtk.Button("Save DAT")
+    save_png_btn = Gtk.Button("Save PNG")
 
     controls = Gtk.Box(:h, 8)
-    push!(controls, Gtk.Label("output"))
-    push!(controls, dir_entry)
+    push!(controls, connect_btn)
+    push!(controls, init_btn)
+    push!(controls, disconnect_btn)
     push!(controls, pick_dir_btn)
     push!(controls, scan_btn)
     push!(controls, stop_btn)
     push!(controls, power_btn)
-    push!(controls, target_entry)
-    push!(controls, target_btn)
+    push!(controls, save_dat_btn)
+    push!(controls, save_png_btn)
 
     canvas_signal = Gtk.GtkCanvas(100, 100)
     canvas_raw = Gtk.GtkCanvas(100, 100)
@@ -369,7 +385,10 @@ function start_gtk_ui!(
     paned[1] = canvas_signal
     paned[2] = canvas_raw
     Gtk.signal_connect((w, alloc) -> Gtk.set_gtk_property!(w, :position, alloc.width ÷ 2), paned, "size-allocate")
-    Gtk.signal_connect((w, alloc) -> Gtk.set_gtk_property!(w, :position, alloc.height), paned, "size-allocate")
+    # Настройка для полного использования пространства
+    Gtk.set_gtk_property!(paned, :expand, true)
+    Gtk.set_gtk_property!(paned, :shrink, true)
+
 
     push!(root, header)
     push!(root, controls)
@@ -377,30 +396,37 @@ function start_gtk_ui!(
     push!(root, paned)
     push!(win, root)
 
-    ui = GtkApp(win, entries, status_label, power_label, points_label, file_label, canvas_signal, canvas_raw)
+    ui = GtkApp(win, entries, status_label, device_label, power_label, points_label, file_label, dir_label, canvas_signal, canvas_raw)
 
-    function apply_target_power!()
-        txt = strip(Gtk.get_gtk_property(target_entry, "text", String))
-        isempty(txt) && return nothing
-        v = try
-            parse(Float64, txt)
-        catch
-            @warn "Invalid target power value: $txt"
-            return nothing
+    function _emit_lifecycle_from_status(status_map::Dict{Symbol,NamedTuple{(:connected,:initialized,:healthy),Tuple{Bool,Bool,Bool}}})
+        connected = !isempty(status_map) && all(v -> v.connected, values(status_map))
+        initialized = !isempty(status_map) && all(v -> v.connected && v.initialized && v.healthy, values(status_map))
+        if initialized
+            msg = "devices: initialized"
+        elseif connected
+            msg = "devices: connected (not initialized)"
+        else
+            msg = "devices: disconnected"
         end
-        put!(power_cmd, SetTargetPower(v))
+        put!(event_ch, SetDeviceLifecycle(connected, initialized, msg))
         return nothing
     end
 
-    Gtk.signal_connect(target_entry, "activate") do _
-        apply_target_power!()
-    end
-
-    Gtk.signal_connect(target_btn, "clicked") do _
-        apply_target_power!()
+    function _refresh_lifecycle!()
+        try
+            _emit_lifecycle_from_status(devices_status(device_hub))
+        catch ex
+            put!(event_ch, SetDeviceLifecycle(false, false, "devices: lifecycle error"))
+            @warn "Failed to read device lifecycle status" exception=(ex, catch_backtrace())
+        end
+        return nothing
     end
 
     Gtk.signal_connect(power_btn, "toggled") do w
+        if !state.devices_initialized
+            Gtk.GAccessor.active(w) && Gtk.set_gtk_property!(w, :active, false)
+            return nothing
+        end
         if Gtk.GAccessor.active(w)
             put!(power_cmd, StartStab())
         else
@@ -408,21 +434,51 @@ function start_gtk_ui!(
         end
     end
 
-    Gtk.signal_connect(dir_entry, "activate") do _
-        state.app_config.dir = strip(Gtk.get_gtk_property(dir_entry, "text", String))
-        return nothing
-    end
-
     Gtk.signal_connect(pick_dir_btn, "clicked") do _
         path = Gtk.open_dialog("Select output folder", win, action=Gtk.GtkFileChooserAction.SELECT_FOLDER)
         path === nothing && return nothing
         chosen = isdir(path) ? path : dirname(path)
-        Gtk.set_gtk_property!(dir_entry, :text, chosen)
         state.app_config.dir = chosen
+        render!(ui, state)
+        return nothing
+    end
+
+    Gtk.signal_connect(connect_btn, "clicked") do _
+        try
+            connect_devices!(device_hub)
+            _refresh_lifecycle!()
+        catch ex
+            @warn "Connect failed" exception=(ex, catch_backtrace())
+        end
+        return nothing
+    end
+
+    Gtk.signal_connect(init_btn, "clicked") do _
+        try
+            init_devices!(device_hub)
+            _refresh_lifecycle!()
+        catch ex
+            @warn "Init failed" exception=(ex, catch_backtrace())
+        end
+        return nothing
+    end
+
+    Gtk.signal_connect(disconnect_btn, "clicked") do _
+        try
+            disconnect_devices!(device_hub)
+            Gtk.GAccessor.active(power_btn) && Gtk.set_gtk_property!(power_btn, :active, false)
+            _refresh_lifecycle!()
+        catch ex
+            @warn "Disconnect failed" exception=(ex, catch_backtrace())
+        end
         return nothing
     end
 
     Gtk.signal_connect(scan_btn, "clicked") do _
+        if !state.devices_initialized
+            put!(event_ch, SetDeviceLifecycle(state.devices_connected, state.devices_initialized, "devices: init required before scan"))
+            return nothing
+        end
         raw_now = _collect_raw_params(ui.entries, state.raw_params)
         state.raw_params = raw_now
         try
@@ -430,14 +486,29 @@ function start_gtk_ui!(
         catch
             return nothing
         end
-        out_dir = strip(Gtk.get_gtk_property(dir_entry, "text", String))
-        state.app_config.dir = out_dir
+        out_dir = strip(state.app_config.dir)
         put!(meas_cmd, StartMeasurement(state.scan_params, isempty(out_dir) ? nothing : out_dir))
         return nothing
     end
 
     Gtk.signal_connect(stop_btn, "clicked") do _
         put!(meas_cmd, StopMeasurement())
+        return nothing
+    end
+
+    Gtk.signal_connect(save_dat_btn, "clicked") do _
+        state.current_spectrum === nothing && return nothing
+        path = Gtk.save_dialog("Save spectrum .dat", win)
+        path === nothing && return nothing
+        save_spectrum_dat(path, state.current_spectrum; params=Dict{Symbol,Any}(:points => length(state.points)))
+        return nothing
+    end
+
+    Gtk.signal_connect(save_png_btn, "clicked") do _
+        state.current_spectrum === nothing && return nothing
+        path = Gtk.save_dialog("Save spectrum .png", win)
+        path === nothing && return nothing
+        save_spectrum_png(path, state.current_spectrum; title="spectrum")
         return nothing
     end
 
@@ -452,6 +523,7 @@ function start_gtk_ui!(
     end
 
     Gtk.showall(win)
+    _refresh_lifecycle!()
 
     @async begin
         for _ui_cmd in ui_channel

@@ -2,6 +2,8 @@ module DeviceManager
 
 export DeviceHub, RawDevice, MockDevice, MockCamDevice
 export DeviceCommand, SetParameter, ReadSignal, ShutdownDevice
+export ConnectDevice, InitDevice, DisconnectDevice, GetDeviceStatus
+export connect_devices!, init_devices!, disconnect_devices!, devices_status, devices_ready
 export device_loop, SystemEvent, DeviceError
 
 abstract type DeviceCommand end
@@ -21,6 +23,22 @@ struct ReadSignal <: DeviceCommand
     reply::Channel
 end
 
+struct ConnectDevice <: DeviceCommand
+    reply::Channel
+end
+
+struct InitDevice <: DeviceCommand
+    reply::Channel
+end
+
+struct DisconnectDevice <: DeviceCommand
+    reply::Channel
+end
+
+struct GetDeviceStatus <: DeviceCommand
+    reply::Channel
+end
+
 struct ShutdownDevice <: DeviceCommand end
 
 abstract type SystemEvent end
@@ -29,35 +47,150 @@ struct DeviceError <: SystemEvent
     message::String
 end
 
+function _request!(ch::Channel{DeviceCommand}, make_cmd::Function)
+    reply = Channel(1)
+    put!(ch, make_cmd(reply))
+    return take!(reply)
+end
+
+function _sorted_device_names(hub::DeviceHub)
+    sort!(collect(keys(hub.devices)); by=String)
+end
+
+function connect_devices!(hub::DeviceHub)
+    out = Dict{Symbol,Any}()
+    for name in _sorted_device_names(hub)
+        out[name] = _request!(hub.devices[name], reply -> ConnectDevice(reply))
+    end
+    return out
+end
+
+function init_devices!(hub::DeviceHub)
+    out = Dict{Symbol,Any}()
+    for name in _sorted_device_names(hub)
+        out[name] = _request!(hub.devices[name], reply -> InitDevice(reply))
+    end
+    return out
+end
+
+function disconnect_devices!(hub::DeviceHub)
+    out = Dict{Symbol,Any}()
+    for name in _sorted_device_names(hub)
+        out[name] = _request!(hub.devices[name], reply -> DisconnectDevice(reply))
+    end
+    return out
+end
+
+function devices_status(hub::DeviceHub)
+    out = Dict{Symbol,NamedTuple{(:connected,:initialized,:healthy),Tuple{Bool,Bool,Bool}}}()
+    for name in _sorted_device_names(hub)
+        st = _request!(hub.devices[name], reply -> GetDeviceStatus(reply))
+        out[name] = st
+    end
+    return out
+end
+
+function devices_ready(hub::DeviceHub)::Bool
+    st = devices_status(hub)
+    all(v -> v.connected && v.initialized && v.healthy, values(st))
+end
+
 function device_loop(raw_dev)
     cmd_ch = raw_dev.device_cmd
     event_ch = raw_dev.device_events
 
-    dev = raw_dev.init_device()
-    t = raw_dev.t
+    dev = nothing
+    connected = false
+    initialized = false
     healthy = true
+    t = raw_dev.t
+
+    function _safe_disconnect!()
+        if connected && dev !== nothing
+            try
+                raw_dev.close_device(dev)
+            catch ex
+                put!(event_ch, DeviceError("Disconnect failed on $(raw_dev.name): $(sprint(showerror, ex))"))
+            end
+        end
+        dev = nothing
+        connected = false
+        initialized = false
+        return nothing
+    end
 
     try
         for cmd in cmd_ch
-
-            if cmd isa SetParameter
-                ok = call_with_timeout(() -> raw_dev.set_param(dev, cmd.name, cmd.value), t)
-                ok === :timeout && (healthy = false)
-
-                if healthy
+            if cmd isa ConnectDevice
+                if connected
                     put!(cmd.reply, :ok)
+                    continue
+                end
+                new_dev = call_with_timeout(() -> raw_dev.connect_device(), t)
+                if new_dev === :timeout
+                    healthy = false
+                    put!(event_ch, DeviceError("Connect timeout on $(raw_dev.name)"))
+                    put!(cmd.reply, :timeout)
                 else
-                    put!(event_ch, DeviceError("Timeout setting $(cmd.name)"))
+                    dev = new_dev
+                    connected = true
+                    initialized = false
+                    healthy = true
+                    put!(cmd.reply, :ok)
+                end
+
+            elseif cmd isa InitDevice
+                if !connected || dev === nothing
+                    put!(cmd.reply, :not_connected)
+                    continue
+                end
+                if initialized
+                    put!(cmd.reply, :ok)
+                    continue
+                end
+                init_res = call_with_timeout(() -> raw_dev.init_device(dev), t)
+                if init_res === :timeout
+                    healthy = false
+                    put!(event_ch, DeviceError("Init timeout on $(raw_dev.name)"))
+                    put!(cmd.reply, :timeout)
+                else
+                    initialized = true
+                    put!(cmd.reply, :ok)
+                end
+
+            elseif cmd isa DisconnectDevice
+                _safe_disconnect!()
+                put!(cmd.reply, :ok)
+
+            elseif cmd isa GetDeviceStatus
+                put!(cmd.reply, (connected=connected, initialized=initialized, healthy=healthy))
+
+            elseif cmd isa SetParameter
+                if !(connected && initialized && healthy)
+                    put!(cmd.reply, :not_ready)
+                    continue
+                end
+                ok = call_with_timeout(() -> raw_dev.set_param(dev, cmd.name, cmd.value), t)
+                if ok === :timeout
+                    healthy = false
+                    put!(event_ch, DeviceError("Timeout setting $(raw_dev.name).$(cmd.name)"))
+                    put!(cmd.reply, :timeout)
+                else
+                    put!(cmd.reply, :ok)
                 end
 
             elseif cmd isa ReadSignal
+                if !(connected && initialized && healthy)
+                    put!(cmd.reply, :not_ready)
+                    continue
+                end
                 val = call_with_timeout(() -> raw_dev.read_signal(dev, cmd.name), t)
-                val === :timeout && (healthy = false)
-
-                if healthy
-                    put!(cmd.reply, val)
+                if val === :timeout
+                    healthy = false
+                    put!(event_ch, DeviceError("Read timeout $(raw_dev.name).$(cmd.name)"))
+                    put!(cmd.reply, :timeout)
                 else
-                    put!(event_ch, DeviceError("Read timeout"))
+                    put!(cmd.reply, val)
                 end
 
             elseif cmd isa ShutdownDevice
@@ -65,12 +198,20 @@ function device_loop(raw_dev)
             end
         end
     finally
-        raw_dev.close_device(dev)
+        if connected && dev !== nothing
+            try
+                raw_dev.close_device(dev)
+            catch ex
+                put!(event_ch, DeviceError("Close failed on $(raw_dev.name): $(sprint(showerror, ex))"))
+            end
+        end
         close(event_ch)
     end
 end
 
 struct RawDevice
+    name::Symbol
+    connect_device::Function
     init_device::Function
     set_param::Function
     read_signal::Function
@@ -80,26 +221,89 @@ struct RawDevice
     device_events::Channel{SystemEvent}
 end
 
-# ---- Mock hardware ----
-MockDevice() = RawDevice(
-    () -> Dict(),
-    (dev, name, value) -> :ok,
-    (dev, name) -> rand(),
-    dev -> nothing,
-    1.0,
-    Channel{DeviceCommand}(32),
-    Channel{SystemEvent}(32)
-)
+function _mock_common_device(name::Symbol)
+    RawDevice(
+        name,
+        () -> Dict{Symbol,Any}(
+            :params => Dict{Symbol,Any}(
+                :target_power => 1.0,
+                :power => 1.0,
+                :ang_power => 0.35,
+                :wl => 550.0,
+                :frames => 1,
+                :acq_time => 0.1,
+            ),
+        ),
+        dev -> :ok,
+        (dev, param, value) -> begin
+            dev[:params][param] = value
+            :ok
+        end,
+        (dev, signal) -> begin
+            params = dev[:params]
+            if signal == :power
+                target = Float64(get(params, :target_power, 1.0))
+                return max(target + 0.02 * randn(), 0.0)
+            elseif signal == :target_power
+                return Float64(get(params, :target_power, 1.0))
+            elseif signal == :ang_power
+                return Float64(get(params, :ang_power, 0.35))
+            elseif signal == :wl
+                return Float64(get(params, :wl, 550.0))
+            end
+            return rand()
+        end,
+        dev -> nothing,
+        1.0,
+        Channel{DeviceCommand}(32),
+        Channel{SystemEvent}(32),
+    )
+end
 
-MockCamDevice() = RawDevice(
-    () -> Dict(),
-    (dev, name, value) -> :ok,
-    (dev, name) -> randn(1024),
-    dev -> nothing,
-    1.0,
-    Channel{DeviceCommand}(32),
-    Channel{SystemEvent}(32)
-)
+# ---- Mock hardware ----
+MockDevice() = _mock_common_device(:mock)
+
+function MockCamDevice()
+    RawDevice(
+        :cam,
+        () -> Dict{Symbol,Any}(
+            :params => Dict{Symbol,Any}(
+                :wl => 550.0,
+                :frames => 1,
+                :acq_time => 0.1,
+            ),
+        ),
+        dev -> :ok,
+        (dev, param, value) -> begin
+            dev[:params][param] = value
+            :ok
+        end,
+        (dev, signal) -> begin
+            params = dev[:params]
+            if signal != :spectrum
+                return get(params, signal, 0.0)
+            end
+
+            n = 1024
+            frames = max(Int(round(Float64(get(params, :frames, 1)))), 1)
+            wl = Float64(get(params, :wl, 550.0))
+            x = collect(1.0:1.0:n)
+            center = 400.0 + 120.0 * sin(wl / 65.0)
+            amp = 900.0 + 180.0 * cos(wl / 45.0)
+            width = 24.0
+
+            acc = zeros(Float64, n)
+            for _ in 1:frames
+                acc .+= 120.0 .+ amp .* exp.(-((x .- center) .^ 2) ./ (2.0 * width^2)) .+ 30.0 .* randn(n)
+            end
+            return acc ./ frames
+        end,
+        dev -> nothing,
+        1.0,
+        Channel{DeviceCommand}(32),
+        Channel{SystemEvent}(32),
+    )
+end
 
 function call_with_timeout(f, timeout)
     t = @async f()

@@ -5,7 +5,7 @@ using ..Measurement
 using ..Power
 using ..DeviceManager
 using ..ParameterParser
-using ..GtkUI: SetParam
+using ..GtkUI: SetParam, SetDeviceLifecycle
 
 export reduce!
 
@@ -46,6 +46,11 @@ function reduce!(state::AppState, ev)
         catch
             # Keep previous scan_params while user is still editing.
         end
+
+    elseif ev isa SetDeviceLifecycle
+        state.devices_connected = ev.connected
+        state.devices_initialized = ev.initialized
+        state.device_status = ev.message
 
     elseif ev isa DeviceError
         state.measurement_state = State.Error

@@ -7,6 +7,7 @@ include("state.jl")
 include("device_manager.jl")
 include("measurement.jl")
 include("power.jl")
+include("processing.jl")
 include("persistence.jl")
 include("view/gtk_ui.jl")
 include("reducer.jl")
@@ -18,6 +19,7 @@ using .State
 using .DeviceManager
 using .Measurement
 using .Power
+using .Processing
 using .Reducer
 using .GtkUI
 
@@ -25,6 +27,7 @@ export AppRuntime, run, stop!
 export start_measurement!, stop_measurement!
 export start_power_stabilization!, stop_power_stabilization!, set_target_power!
 export start_gtk_ui!
+export save_spectrum_dat, save_spectrum_png
 
 mutable struct AppRuntime
     state::AppState
@@ -168,7 +171,8 @@ start_gtk_ui!(runtime::AppRuntime; config_path::AbstractString="preset.json", ti
         runtime.ui_events,
         runtime.ui_cmd,
         runtime.meas_cmd,
-        runtime.power_cmd;
+        runtime.power_cmd,
+        runtime.device_hub;
         config_path=config_path,
         title=title,
     )

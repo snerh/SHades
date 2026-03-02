@@ -64,6 +64,14 @@ function _read_signal(manager, dev::Symbol, name::Symbol)
     return take!(reply)
 end
 
+function _hub_ready(manager)::Bool
+    try
+        return devices_ready(manager)
+    catch
+        return false
+    end
+end
+
 function _to_float_vector(x)
     if x isa AbstractVector
         return Float64.(collect(x))
@@ -381,6 +389,10 @@ function measurement_loop(cmd_ch, event_ch, manager)
             if cmd isa StartMeasurement
                 _stop_running!(running_task, stop_requested)
                 stop_requested = Ref(false)
+                if !_hub_ready(manager)
+                    put!(event_ch, DeviceError("Devices are not initialized. Run Connect/Init first."))
+                    continue
+                end
                 running_task = @async begin
                     try
                         _run_measurement!(event_ch, manager, cmd.params, cmd.output_dir, stop_requested)

@@ -38,11 +38,14 @@ mutable struct AppState
     current_raw::Vector{Float64}
     current_power::Float64
     last_saved_file::Union{Nothing,String}
+    devices_connected::Bool
+    devices_initialized::Bool
+    device_status::String
 
     app_config::AppConfig
 
     function AppState()
-        new(Idle, Off, Pair{Symbol,String}[], nothing, nothing, Point[], Float64[], 0.0, nothing, AppConfig("."))
+        new(Idle, Off, Pair{Symbol,String}[], nothing, nothing, Point[], Float64[], 0.0, nothing, false, false, "devices: disconnected", AppConfig("."))
     end
 end
 
