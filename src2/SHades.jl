@@ -12,6 +12,7 @@ include("processing.jl")
 include("persistence.jl")
 include("view/gtk_ui.jl")
 include("reducer.jl")
+include("devices/raw/raw_devices.jl")
 
 using .Domain
 using .Parameters
@@ -24,8 +25,9 @@ using .Processing
 using .PlotRender
 using .Reducer
 using .GtkUI
+using .RawDevices
 
-export AppRuntime, run, stop!
+export AppRuntime, run, run_real, stop!
 export start_measurement!, stop_measurement!
 export start_power_stabilization!, stop_power_stabilization!, set_target_power!
 export start_gtk_ui!
@@ -43,7 +45,7 @@ mutable struct AppRuntime
     tasks::Vector{Task}
 end
 
-function run()
+function _start_runtime(devices::Vector{RawDevice}, device_hub::DeviceHub)
 
     state = AppState()
 
@@ -56,17 +58,11 @@ function run()
     ui_events = Channel{SystemEvent}(32)
     ui_cmd = Channel{Nothing}(16)
 
-    md = MockDevice()
-    md_cam = MockCamDevice()
-    device_hub = DeviceHub(Dict(
-        :laser => md.device_cmd,
-        :spec => md.device_cmd,
-        :ell => md.device_cmd,
-        :cam => md_cam.device_cmd,
-        :pd => md.device_cmd,
-    ))
-    t_device = @async device_loop(md) ## тут должны быть все приборы, пока заглушка с одним
-    t_device_cam = @async device_loop(md_cam)
+    name_by_channel = Dict{Channel{DeviceCommand},Symbol}()
+    for (name, ch) in device_hub.devices
+        name_by_channel[ch] = name
+    end
+    device_tasks = [@async device_loop(dev, get(name_by_channel, dev.device_cmd, :device)) for dev in devices]
     t_measure = @async measurement_loop(meas_cmd, meas_events, device_hub)
     t_power = @async power_loop(power_cmd, power_events, device_hub)
 
@@ -75,15 +71,15 @@ function run()
 
     t_fwd_meas = @async forward(meas_events, event_bus)
     t_fwd_power = @async forward(power_events, event_bus)
-    t_fwd_dev = @async forward(md.device_events, event_bus)
-    t_fwd_dev_cam = @async forward(md_cam.device_events, event_bus)
+    t_fwd_dev = [@async forward(dev.device_events, event_bus) for dev in devices]
     t_fwd_ui = @async forward(ui_events, event_bus)
 
     t_bus_closer = @async begin
         wait(t_fwd_meas)
         wait(t_fwd_power)
-        wait(t_fwd_dev)
-        wait(t_fwd_dev_cam)
+        for t in t_fwd_dev
+            wait(t)
+        end
         wait(t_fwd_ui)
         close(event_bus)
     end
@@ -100,8 +96,30 @@ function run()
         end
     end
 
-    tasks = Task[t_device, t_device_cam, t_measure, t_power, t_fwd_meas, t_fwd_power, t_fwd_dev, t_fwd_dev_cam, t_fwd_ui, t_bus_closer, t_reducer]
-    return AppRuntime(state, RawDevice[md, md_cam], device_hub, meas_cmd, power_cmd, ui_events, ui_cmd, tasks)
+    tasks = Task[]
+    append!(tasks, device_tasks)
+    append!(tasks, Task[t_measure, t_power, t_fwd_meas, t_fwd_power])
+    append!(tasks, t_fwd_dev)
+    append!(tasks, Task[t_fwd_ui, t_bus_closer, t_reducer])
+    return AppRuntime(state, devices, device_hub, meas_cmd, power_cmd, ui_events, ui_cmd, tasks)
+end
+
+function run()
+    md = MockDevice()
+    md_cam = MockCamDevice()
+    device_hub = DeviceHub(Dict(
+        :laser => md.device_cmd,
+        :spec => md.device_cmd,
+        :ell => md.device_cmd,
+        :cam => md_cam.device_cmd,
+        :pd => md.device_cmd,
+    ))
+    return _start_runtime(RawDevice[md, md_cam], device_hub)
+end
+
+function run_real(; kwargs...)
+    real = RawDevices.build_real_devices(; kwargs...)
+    return _start_runtime(real.devices, real.hub)
 end
 
 function forward(src, dst)

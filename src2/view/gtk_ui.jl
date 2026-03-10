@@ -44,6 +44,16 @@ mutable struct GtkApp
     zbox::Any
     mode_box::Any
     log_cb::Any
+    connect_btn::Any
+    init_btn::Any
+    disconnect_btn::Any
+    pick_dir_btn::Any
+    scan_btn::Any
+    focus_btn::Any
+    stop_btn::Any
+    power_btn::Any
+    save_dat_btn::Any
+    save_png_btn::Any
     canvas_signal::Any
     canvas_raw::Any
 end
@@ -122,6 +132,25 @@ function _update_plot_controls!(ui::GtkApp)
     return nothing
 end
 
+function _is_measurement_active(state::AppState)
+    state.measurement_state in (State.Preparing, State.Running, State.Paused, State.Stopping)
+end
+
+function _to_int_default(v, default::Int=1)
+    try
+        return Int(round(Float64(v)))
+    catch
+        return default
+    end
+end
+
+function _focus_axes(scan_params::ScanAxisSet)
+    axes = scan_params.axes
+    have_loop = false
+    push!(axes, LoopAxis(name=:loop, start=1, step=1, stop=nothing))
+    return ScanAxisSet(axes)
+end
+
 function _safe_canvas_ctx(canvas)
     try
         return Gtk.getgc(canvas)
@@ -181,6 +210,34 @@ function _render_raw_canvas!(canvas, state::AppState)
     return nothing
 end
 
+function _update_controls_state!(ui::GtkApp, state::AppState)
+    running = _is_measurement_active(state)
+    connected = state.devices_connected
+    initialized = state.devices_initialized
+    have_signal = !isempty(_signal_points(state))
+
+    Gtk.set_gtk_property!(ui.connect_btn, :sensitive, !running && !connected)
+    Gtk.set_gtk_property!(ui.init_btn, :sensitive, !running && connected && !initialized)
+    Gtk.set_gtk_property!(ui.disconnect_btn, :sensitive, !running && connected)
+    Gtk.set_gtk_property!(ui.pick_dir_btn, :sensitive, !running)
+    Gtk.set_gtk_property!(ui.scan_btn, :sensitive, !running && initialized && state.scan_params !== nothing)
+    Gtk.set_gtk_property!(ui.focus_btn, :sensitive, !running && initialized && state.scan_params !== nothing)
+    Gtk.set_gtk_property!(ui.stop_btn, :sensitive, running)
+    Gtk.set_gtk_property!(ui.power_btn, :sensitive, initialized)
+    Gtk.set_gtk_property!(ui.save_dat_btn, :sensitive, have_signal)
+    Gtk.set_gtk_property!(ui.save_png_btn, :sensitive, have_signal)
+
+    if !initialized && Gtk.GAccessor.active(ui.power_btn)
+        Gtk.set_gtk_property!(ui.power_btn, :active, false)
+    end
+
+    for entry in values(ui.entries)
+        Gtk.set_gtk_property!(entry.widget, :sensitive, !running)
+    end
+
+    return nothing
+end
+
 function render!(ui::GtkApp, state::AppState)
     points = length(state.points)
     Gtk.set_gtk_property!(ui.status_label, :label, "measurement: $(state.measurement_state)")
@@ -192,6 +249,7 @@ function render!(ui::GtkApp, state::AppState)
     Gtk.set_gtk_property!(ui.dir_label, :label, "dir: $(state.app_config.dir)")
 
     _update_plot_controls!(ui)
+    _update_controls_state!(ui, state)
     _render_signal_canvas!(ui, state)
     _render_raw_canvas!(ui.canvas_raw, state)
     return nothing
@@ -247,6 +305,7 @@ function start_gtk_ui!(
     disconnect_btn = Gtk.Button("Disconnect")
     pick_dir_btn = Gtk.Button("Dir")
     scan_btn = Gtk.Button("Scan")
+    focus_btn = Gtk.Button("Focus")
     stop_btn = Gtk.Button("Stop")
     power_btn = Gtk.ToggleButton("Power stab")
     save_dat_btn = Gtk.Button("Save DAT")
@@ -258,6 +317,7 @@ function start_gtk_ui!(
     push!(controls, disconnect_btn)
     push!(controls, pick_dir_btn)
     push!(controls, scan_btn)
+    push!(controls, focus_btn)
     push!(controls, stop_btn)
     push!(controls, power_btn)
     push!(controls, save_dat_btn)
@@ -316,6 +376,7 @@ function start_gtk_ui!(
         win, entries,
         status_label, device_label, power_label, points_label, file_label, dir_label,
         xbox, ybox, zbox, mode_box, log_cb,
+        connect_btn, init_btn, disconnect_btn, pick_dir_btn, scan_btn, focus_btn, stop_btn, power_btn, save_dat_btn, save_png_btn,
         canvas_signal, canvas_raw,
     )
 
@@ -421,6 +482,23 @@ function start_gtk_ui!(
         end
         out_dir = strip(state.app_config.dir)
         put!(meas_cmd, StartMeasurement(state.scan_params, isempty(out_dir) ? nothing : out_dir))
+        return nothing
+    end
+
+    Gtk.signal_connect(focus_btn, "clicked") do _
+        if !state.devices_initialized
+            put!(event_ch, SetDeviceLifecycle(state.devices_connected, state.devices_initialized, "devices: init required before focus"))
+            return nothing
+        end
+        raw_now = _collect_raw_params(ui.entries, state.raw_params)
+        state.raw_params = raw_now
+        try
+            state.scan_params = build_scan_axis_set_from_text_specs(raw_now)
+        catch
+            return nothing
+        end
+        state.scan_params === nothing && return nothing
+        put!(meas_cmd, StartMeasurement(_focus_axes(state.scan_params), nothing))
         return nothing
     end
 

@@ -95,7 +95,7 @@ function devices_ready(hub::DeviceHub)::Bool
     all(v -> v.connected && v.initialized && v.healthy, values(st))
 end
 
-function device_loop(raw_dev)
+function device_loop(raw_dev, name::Symbol=:device)
     cmd_ch = raw_dev.device_cmd
     event_ch = raw_dev.device_events
 
@@ -110,7 +110,7 @@ function device_loop(raw_dev)
             try
                 raw_dev.close_device(dev)
             catch ex
-                put!(event_ch, DeviceError("Disconnect failed on $(raw_dev.name): $(sprint(showerror, ex))"))
+                put!(event_ch, DeviceError("Disconnect failed on $(name): $(sprint(showerror, ex))"))
             end
         end
         dev = nothing
@@ -129,7 +129,7 @@ function device_loop(raw_dev)
                 new_dev = call_with_timeout(() -> raw_dev.connect_device(), t)
                 if new_dev === :timeout
                     healthy = false
-                    put!(event_ch, DeviceError("Connect timeout on $(raw_dev.name)"))
+                    put!(event_ch, DeviceError("Connect timeout on $(name)"))
                     put!(cmd.reply, :timeout)
                 else
                     dev = new_dev
@@ -151,7 +151,7 @@ function device_loop(raw_dev)
                 init_res = call_with_timeout(() -> raw_dev.init_device(dev), t)
                 if init_res === :timeout
                     healthy = false
-                    put!(event_ch, DeviceError("Init timeout on $(raw_dev.name)"))
+                    put!(event_ch, DeviceError("Init timeout on $(name)"))
                     put!(cmd.reply, :timeout)
                 else
                     initialized = true
@@ -173,7 +173,7 @@ function device_loop(raw_dev)
                 ok = call_with_timeout(() -> raw_dev.set_param(dev, cmd.name, cmd.value), t)
                 if ok === :timeout
                     healthy = false
-                    put!(event_ch, DeviceError("Timeout setting $(raw_dev.name).$(cmd.name)"))
+                    put!(event_ch, DeviceError("Timeout setting $(name).$(cmd.name)"))
                     put!(cmd.reply, :timeout)
                 else
                     put!(cmd.reply, :ok)
@@ -187,7 +187,7 @@ function device_loop(raw_dev)
                 val = call_with_timeout(() -> raw_dev.read_signal(dev, cmd.name), t)
                 if val === :timeout
                     healthy = false
-                    put!(event_ch, DeviceError("Read timeout $(raw_dev.name).$(cmd.name)"))
+                    put!(event_ch, DeviceError("Read timeout $(name).$(cmd.name)"))
                     put!(cmd.reply, :timeout)
                 else
                     put!(cmd.reply, val)
@@ -202,7 +202,7 @@ function device_loop(raw_dev)
             try
                 raw_dev.close_device(dev)
             catch ex
-                put!(event_ch, DeviceError("Close failed on $(raw_dev.name): $(sprint(showerror, ex))"))
+                put!(event_ch, DeviceError("Close failed on $(name): $(sprint(showerror, ex))"))
             end
         end
         close(event_ch)
@@ -210,7 +210,6 @@ function device_loop(raw_dev)
 end
 
 struct RawDevice
-    name::Symbol
     connect_device::Function
     init_device::Function
     set_param::Function
@@ -221,9 +220,8 @@ struct RawDevice
     device_events::Channel{SystemEvent}
 end
 
-function _mock_common_device(name::Symbol)
+function _mock_common_device()
     RawDevice(
-        name,
         () -> Dict{Symbol,Any}(
             :params => Dict{Symbol,Any}(
                 :target_power => 1.0,
@@ -261,11 +259,10 @@ function _mock_common_device(name::Symbol)
 end
 
 # ---- Mock hardware ----
-MockDevice() = _mock_common_device(:mock)
+MockDevice() = _mock_common_device()
 
 function MockCamDevice()
     RawDevice(
-        :cam,
         () -> Dict{Symbol,Any}(
             :params => Dict{Symbol,Any}(
                 :wl => 550.0,
