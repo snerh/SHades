@@ -7,12 +7,14 @@ using ..Parameters
 using ..Persistence
 using ..ParameterParser
 using ..DeviceManager: SystemEvent, DeviceHub, connect_devices!, init_devices!, disconnect_devices!, devices_status
-using ..Measurement: MeasurementCommand, StartMeasurement, StopMeasurement
+using ..Measurement: MeasurementCommand, StartMeasurement, StopMeasurement, UpdateMeasurementParams
 using ..Power: PowerCommand, StartStab, StopStab
 using ..Processing: save_plot_dat, save_plot_png
 using ..PlotRender: DEFAULT_AXIS_CHOICES, render_signal_plot!
 
 export SetParam, AxisEntry, GtkApp, start_gtk_ui!, render!, test_gtk
+
+const _GTK_CSS_PRIORITY_APPLICATION = Cuint(800)
 
 struct SetParam <: SystemEvent
     name::Symbol
@@ -74,6 +76,74 @@ function AxisEntry(name::Symbol, event_ch, init_str::AbstractString)
     return AxisEntry(name, entry)
 end
 
+function _gtk_install_error_css!(win)
+    css = """
+    entry.axis-error,
+    entry.axis-error:focus {
+        background-image: none;
+        box-shadow: none;
+        background-color: #ffe4e6;
+        color: #7f1d1d;
+        border-color: #dc2626;
+    }
+    """
+    provider = Gtk.CssProviderLeaf(data=css)
+    screen = Gtk.GAccessor.screen(win)
+    ccall((:gtk_style_context_add_provider_for_screen, Gtk.libgtk), Nothing,
+        (Ptr{Nothing}, Ptr{Gtk.GObject}, Cuint),
+        screen, provider, _GTK_CSS_PRIORITY_APPLICATION)
+    return provider
+end
+
+function _gtk_set_style_class!(widget, class_name::String, on::Bool)
+    style_ctx = Gtk.GAccessor.style_context(widget)
+    if on
+        ccall((:gtk_style_context_add_class, Gtk.libgtk), Nothing,
+            (Ptr{Nothing}, Cstring), style_ctx.handle, class_name)
+    else
+        ccall((:gtk_style_context_remove_class, Gtk.libgtk), Nothing,
+            (Ptr{Nothing}, Cstring), style_ctx.handle, class_name)
+    end
+    ccall((:gtk_widget_queue_draw, Gtk.libgtk), Nothing, (Ptr{Gtk.GObject},), widget.handle)
+    return nothing
+end
+
+function _gtk_set_field_error!(entry, msg::String)
+    _gtk_set_style_class!(entry, "axis-error", true)
+    Gtk.set_gtk_property!(entry, :tooltip_text, msg)
+    try
+        Gtk.set_gtk_property!(entry, :secondary_icon_name, "dialog-error-symbolic")
+        Gtk.set_gtk_property!(entry, :secondary_icon_tooltip_text, msg)
+    catch
+    end
+end
+
+function _gtk_clear_field_error!(entry)
+    _gtk_set_style_class!(entry, "axis-error", false)
+    Gtk.set_gtk_property!(entry, :tooltip_text, "")
+    try
+        Gtk.set_gtk_property!(entry, :secondary_icon_name, "")
+        Gtk.set_gtk_property!(entry, :secondary_icon_tooltip_text, "")
+    catch
+    end
+end
+
+function _gtk_clear_errors!(entries::Dict{Symbol,AxisEntry})
+    for e in values(entries)
+        _gtk_clear_field_error!(e.widget)
+    end
+    return nothing
+end
+
+function _gtk_apply_errors!(entries::Dict{Symbol,AxisEntry}, errs::Dict{Symbol,String})
+    _gtk_clear_errors!(entries)
+    for (k, msg) in errs
+        haskey(entries, k) || continue
+        _gtk_set_field_error!(entries[k].widget, msg)
+    end
+    return nothing
+end
+
 function _build_form_box(raw_params::Vector{Pair{Symbol,String}}, event_ch)
     gtk = Gtk
     form = gtk.Box(:v, 6)
@@ -101,6 +171,69 @@ function _collect_raw_params(entries::Dict{Symbol,AxisEntry}, template::Vector{P
         push!(out, name => txt)
     end
     return out
+end
+
+function _collect_fixed_params(raw_params::Vector{Pair{Symbol,String}})
+    out = Dict{Symbol,Any}()
+    for (name, spec) in raw_params
+        ax = try
+            parse_axis_spec(name, spec)
+        catch
+            nothing
+        end
+        ax isa FixedAxis || continue
+        out[name] = ax.value
+    end
+    return out
+end
+
+function _validation_help_text()
+    return join([
+        "Допустимые форматы:",
+        "  1) Число: 500",
+        "  2) Диапазон: 500:2:540 (start:step:stop)",
+        "  3) Список: 500,510,520",
+        "  4) Выражение: =round(wl/40)*20",
+        "  5) Строка: \"SIG\"",
+    ], "\n")
+end
+
+function _validate_specs(raw_params::Vector{Pair{Symbol,String}})
+    errs = Dict{Symbol,String}()
+    for (name, spec) in raw_params
+        spec_str = String(spec)
+        ax = nothing
+        try
+            ax = parse_axis_spec(name, spec_str)
+        catch ex
+            errs[name] = sprint(showerror, ex)
+            continue
+        end
+
+        if startswith(strip(spec_str), "=")
+            if !(ax isa FixedAxis || ax isa DependentAxis || ax isa MultiDependentAxis)
+                errs[name] = "invalid expression"
+            elseif ax isa FixedAxis && ax.value isa AbstractString
+                errs[name] = "invalid expression"
+            end
+        elseif occursin(":", spec_str) || occursin("..", spec_str) || occursin(",", spec_str)
+            if !(ax isa RangeAxis || ax isa ListAxis)
+                errs[name] = "invalid range/list format"
+            end
+        end
+    end
+    return errs
+end
+
+function _show_validation_dialog(win, errs::Dict{Symbol,String})
+    isempty(errs) && return nothing
+    fields = join(string.(collect(keys(errs))), ", ")
+    msg = "Ошибки в полях: $fields"
+    dialog = Gtk.MessageDialog(win, Gtk.DialogFlags.MODAL, Gtk.MessageType.ERROR, Gtk.ButtonsType.OK, msg)
+    Gtk.set_gtk_property!(dialog, :secondary_text, _validation_help_text())
+    Gtk.run(dialog)
+    Gtk.destroy(dialog)
+    return nothing
 end
 
 function _active_text(box, fallback::AbstractString)
@@ -134,6 +267,12 @@ end
 
 function _is_measurement_active(state::AppState)
     state.measurement_state in (State.Preparing, State.Running, State.Paused, State.Stopping)
+end
+
+function _is_focus_mode(state::AppState)
+    sp = state.scan_params
+    sp === nothing && return false
+    return any(ax -> ax isa LoopAxis && ax.name == :loop && ax.stop === nothing, sp.axes)
 end
 
 function _to_int_default(v, default::Int=1)
@@ -212,6 +351,7 @@ end
 
 function _update_controls_state!(ui::GtkApp, state::AppState)
     running = _is_measurement_active(state)
+    focus_running = running && _is_focus_mode(state)
     connected = state.devices_connected
     initialized = state.devices_initialized
     have_signal = !isempty(_signal_points(state))
@@ -232,7 +372,7 @@ function _update_controls_state!(ui::GtkApp, state::AppState)
     end
 
     for entry in values(ui.entries)
-        Gtk.set_gtk_property!(entry.widget, :sensitive, !running)
+        Gtk.set_gtk_property!(entry.widget, :sensitive, !running || focus_running)
     end
 
     return nothing
@@ -379,6 +519,40 @@ function start_gtk_ui!(
         connect_btn, init_btn, disconnect_btn, pick_dir_btn, scan_btn, focus_btn, stop_btn, power_btn, save_dat_btn, save_png_btn,
         canvas_signal, canvas_raw,
     )
+    _gtk_install_error_css!(win)
+
+    function _maybe_update_focus_params!()
+        if !(_is_measurement_active(state) && _is_focus_mode(state))
+            return nothing
+        end
+        raw_now = _collect_raw_params(ui.entries, state.raw_params)
+        state.raw_params = raw_now
+        errs = _validate_specs(raw_now)
+        _gtk_apply_errors!(ui.entries, errs)
+        live = _collect_fixed_params(raw_now)
+        isempty(live) && return nothing
+        put!(meas_cmd, UpdateMeasurementParams(live))
+        return nothing
+    end
+
+    for entry in values(ui.entries)
+        Gtk.signal_connect((_) -> begin
+            raw_now = _collect_raw_params(ui.entries, state.raw_params)
+            state.raw_params = raw_now
+            errs = _validate_specs(raw_now)
+            _gtk_apply_errors!(ui.entries, errs)
+            _maybe_update_focus_params!()
+            return nothing
+        end, entry.widget, "activate")
+        Gtk.signal_connect((_) -> begin
+            raw_now = _collect_raw_params(ui.entries, state.raw_params)
+            state.raw_params = raw_now
+            errs = _validate_specs(raw_now)
+            _gtk_apply_errors!(ui.entries, errs)
+            _maybe_update_focus_params!()
+            return nothing
+        end, entry.widget, "editing-done")
+    end
 
     function _emit_lifecycle_from_status(status_map::Dict{Symbol,NamedTuple{(:connected,:initialized,:healthy),Tuple{Bool,Bool,Bool}}})
         connected = !isempty(status_map) && all(v -> v.connected, values(status_map))
@@ -475,6 +649,14 @@ function start_gtk_ui!(
         end
         raw_now = _collect_raw_params(ui.entries, state.raw_params)
         state.raw_params = raw_now
+        errs = _validate_specs(raw_now)
+        if !isempty(errs)
+            _gtk_apply_errors!(ui.entries, errs)
+            _show_validation_dialog(win, errs)
+            return nothing
+        else
+            _gtk_clear_errors!(ui.entries)
+        end
         try
             state.scan_params = build_scan_axis_set_from_text_specs(raw_now)
         catch
@@ -492,6 +674,14 @@ function start_gtk_ui!(
         end
         raw_now = _collect_raw_params(ui.entries, state.raw_params)
         state.raw_params = raw_now
+        errs = _validate_specs(raw_now)
+        if !isempty(errs)
+            _gtk_apply_errors!(ui.entries, errs)
+            _show_validation_dialog(win, errs)
+            return nothing
+        else
+            _gtk_clear_errors!(ui.entries)
+        end
         try
             state.scan_params = build_scan_axis_set_from_text_specs(raw_now)
         catch

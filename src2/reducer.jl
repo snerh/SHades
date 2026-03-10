@@ -41,10 +41,13 @@ function reduce!(state::AppState, ev)
         else
             state.raw_params[param_index] = ev.name => ev.val
         end
-        try
-            state.scan_params = build_scan_axis_set_from_text_specs(state.raw_params)
-        catch
-            # Keep previous scan_params while user is still editing.
+        running = state.measurement_state in (State.Preparing, State.Running, State.Paused, State.Stopping)
+        if !running
+            try
+                state.scan_params = build_scan_axis_set_from_text_specs(state.raw_params)
+            catch
+                # Keep previous scan_params while user is still editing.
+            end
         end
 
     elseif ev isa SetDeviceLifecycle

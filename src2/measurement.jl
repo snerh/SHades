@@ -5,7 +5,7 @@ using ..Domain
 using ..Parameters
 using ..DeviceManager
 
-export MeasurementCommand, StartMeasurement, StopMeasurement, ShutdownMeasurement
+export MeasurementCommand, StartMeasurement, StopMeasurement, ShutdownMeasurement, UpdateMeasurementParams
 export measurement_loop, MeasurementStarted, MeasurementStep, MeasurementDone, MeasurementStopped
 
 abstract type MeasurementCommand end
@@ -18,6 +18,9 @@ StartMeasurement(params::ScanAxisSet) = StartMeasurement(params, nothing)
 
 struct StopMeasurement <: MeasurementCommand end
 struct ShutdownMeasurement <: MeasurementCommand end
+struct UpdateMeasurementParams <: MeasurementCommand
+    params::Dict{Symbol,Any}
+end
 
 struct MeasurementStarted <: SystemEvent
     output_dir::Union{Nothing,String}
@@ -352,7 +355,7 @@ function _measurement_step!(
     return nothing
 end
 
-function _run_measurement!(event_ch, manager, scan_axes::ScanAxisSet, output_dir::Union{Nothing,String}, stop_requested)
+function _run_measurement!(event_ch, manager, scan_axes::ScanAxisSet, output_dir::Union{Nothing,String}, stop_requested, live_params)
     ctx = _measurement_start!(manager, scan_axes)
     step_index = Ref(0)
     output_dir !== nothing && mkpath(output_dir)
@@ -361,7 +364,12 @@ function _run_measurement!(event_ch, manager, scan_axes::ScanAxisSet, output_dir
     body = function (p::Dict{Symbol,Any}, stem::String)
         stop_requested[] && return :stop
         step_index[] += 1
-        _measurement_step!(event_ch, manager, ctx, p, step_index[]; output_dir=output_dir, stem=stem)
+        p_eff = copy(p)
+        lp = live_params[]
+        if !isempty(lp)
+            merge!(p_eff, lp)
+        end
+        _measurement_step!(event_ch, manager, ctx, p_eff, step_index[]; output_dir=output_dir, stem=stem)
         return :continue
     end
 
@@ -377,6 +385,7 @@ end
 function measurement_loop(cmd_ch, event_ch, manager)
     running_task = nothing
     stop_requested = Ref(false)
+    live_params = Ref(Dict{Symbol,Any}())
 
     try
         while true
@@ -389,22 +398,26 @@ function measurement_loop(cmd_ch, event_ch, manager)
             if cmd isa StartMeasurement
                 _stop_running!(running_task, stop_requested)
                 stop_requested = Ref(false)
+                live_params[] = Dict{Symbol,Any}()
                 if !_hub_ready(manager)
                     put!(event_ch, DeviceError("Devices are not initialized. Run Connect/Init first."))
                     continue
                 end
                 running_task = @async begin
                     try
-                        _run_measurement!(event_ch, manager, cmd.params, cmd.output_dir, stop_requested)
+                        _run_measurement!(event_ch, manager, cmd.params, cmd.output_dir, stop_requested, live_params)
                     catch ex
                         put!(event_ch, DeviceError("Measurement loop failed: $(sprint(showerror, ex))"))
                     end
                 end
             elseif cmd isa StopMeasurement
                 _stop_running!(running_task, stop_requested)
+                live_params[] = Dict{Symbol,Any}()
             elseif cmd isa ShutdownMeasurement
                 _stop_running!(running_task, stop_requested)
                 break
+            elseif cmd isa UpdateMeasurementParams
+                merge!(live_params[], cmd.params)
             end
         end
     finally
