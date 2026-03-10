@@ -1,6 +1,7 @@
 module RawDevices
 
 using ..DeviceManager
+using Statistics
 import JSON
 
 const RAW_DIR = @__DIR__
@@ -97,6 +98,31 @@ function _sec_to_psi_time(t_s::Float64)
         return (ms, "ms")
     end
     return (Int(round(t_s)), "s")
+end
+
+function _unmuon(d; factor=2)
+    frames = length(d)
+    px = length(d[1])
+    res = Vector{Float64}(undef, px)
+    for i in 1:px
+        l = map(fr -> fr[i], d)
+        s = sort(l)
+        function aux(s)
+            acc = s[1]
+            sigm = sqrt(abs(s[1]))
+            for j in 1:frames
+                if s[j] > acc + sigm * factor + 30
+                    return acc
+                else
+                    acc = mean(s[1:j])
+                    sigm = j == 1 ? sigm : std(s[1:j])
+                end
+            end
+            return acc
+        end
+        res[i] = aux(s)
+    end
+    return res
 end
 
 function _make_device(
@@ -302,26 +328,24 @@ function CameraDevice(
     read_signal = (dev, name) -> begin
         if name == :spectrum
             frames = max(state.frames, 1)
-            acc = Vector{Float64}()
-            for i in 1:frames
-                status, param = PSI.wait_scan_complete(dev; timeout_s=state.scan_timeout_s, do_start=true)
-                if status == :timeout
-                    try
-                        PSI.abort_scan(dev)
-                    catch
-                    end
-                    error("PSI scan timeout")
-                elseif status == :error
-                    error("PSI scan error: code $(param)")
+            status, param = PSI.wait_scan_complete(dev; timeout_s=state.scan_timeout_s, do_start=true)
+            if status == :timeout
+                try
+                    PSI.abort_scan(dev)
+                catch
                 end
-                raw = Float64.(PSI.get_data(dev))
-                if i == 1
-                    acc = raw
-                else
-                    acc .+= raw
-                end
+                error("PSI scan timeout")
+            elseif status == :error
+                error("PSI scan error: code $(param)")
             end
-            return acc ./ frames
+
+            raw = Float64.(PSI.get_data(dev, frames=frames))
+            px = length(raw) ÷ frames
+            if px * frames != length(raw)
+                error("PSI data size mismatch: frames=$(frames), len=$(length(raw))")
+            end
+            frames_data = [raw[(i - 1) * px + 1:i * px] for i in 1:frames]
+            return _unmuon(frames_data)
         elseif name == :temp
             return PSI.get_temp(dev)
         end

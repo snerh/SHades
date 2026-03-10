@@ -202,7 +202,7 @@ function get_dims(dev::PSIDevice, FPGA::Integer=0, sensor::Integer=0)
     Int.(round.((roi_w / bin_w, roi_h / bin_h)))
 end
 
-function set_params(dev::PSIDevice, FPGA::Integer=0, sensor::Integer=0; time::Union{Nothing,Tuple{Int,String}}=nothing)
+function set_params(dev::PSIDevice, FPGA::Integer=0, sensor::Integer=0; time::Union{Nothing,Tuple{Int,String}}=nothing, frames::Int32=1)
     buf = get_params(dev, FPGA, sensor)
     if time !== nothing
         x, unit = time
