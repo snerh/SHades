@@ -50,26 +50,26 @@ end
 
 module Sol
 include("Log.jl")
-mot_num = [1;5;9;6;8] # wl tur sl port shutter
+const MOT_NUM = [1; 5; 9; 6; 8] # wl tur sl port shutter
 import ..Calibr
 import LibSerialPort as LSP
 include("readl.jl")
-lk = ReentrantLock() # lock read-write sequence
 
 struct Spec
     s
     motors::Vector{Int64}
     mot_cals::Vector{Calibr.T}
     wl_cals::Vector{Calibr.T}
+    lk::ReentrantLock
 end
 function Spec(s)
-    Spec(s, [], [], [] )
+    Spec(s, [], [], [], ReentrantLock())
 end
 
 function open(port = "COM5"; conf_dir = ".")
     s = LSP.open(port, 9600)
-    motors = zeros(length(mot_num))
-    motors = map( x -> get_motor(Spec(s), x), mot_num)
+    tmp = Spec(s)
+    motors = map(x -> get_motor(tmp, x), MOT_NUM)
     tur_c = Calibr.T([1;2;3;4],[10968; 30964; 50958; 70960])
     sl_c = Calibr.T([0;5000], [271;10271])
     port_c = Calibr.T([0;1], [527;5900]) # 1 - CCD
@@ -78,7 +78,7 @@ function open(port = "COM5"; conf_dir = ".")
     Spec(s, motors,
          [Calibr.T([0],[0]); tur_c; sl_c; port_c; shutter_c],
          map(Calibr.from_file, cal_files)
-        )
+        , tmp.lk)
 end
 function close(s)
     LSP.close(s.s)
@@ -105,21 +105,20 @@ function bel2num(b)
     acc
 end
 function wait2read(s,timeout = 20)
-    t1 = time()
-    task_read = Threads.@spawn readl(s,'\n')
-    while (time()-t1 < timeout)
-         if istaskdone(task_read)
-             return fetch(task_read)
-         else
-      sleep(0.01)
+    LSP.set_read_timeout(s, timeout)
+    try
+        return LSP.readline(s)
+    catch e
+        if isa(e, LSP.Timeout)
+            @warn "SOL read timeout"
+            return ""
+        end
+        rethrow()
     end
-  end
-  @warn "SOL read timeout"
-  ""
 end
 
 function get_motor(s, n)
-  lock(lk)
+  lock(s.lk)
   try
     #LSP.sp_flush(s.s,LSP.SP_BUF_BOTH)
     num_str = num2bel(n,2)*num2bel(n+6,2)
@@ -132,17 +131,17 @@ function get_motor(s, n)
     vec = wait2read(s.s)
     Log.printlog("Sol readed: ", vec)
     steps = bel2num(vec)
-    ind = findfirst(x -> x==n, mot_num)
+    ind = findfirst(x -> x==n, MOT_NUM)
     # if ind != nothing s.motors[ind] = steps end
     return steps
   catch
     @warn "Sol get_motor error"
   finally
-    unlock(lk)
+    unlock(s.lk)
   end
 end
 function inc_motor(s, n, steps)
-  lock(lk)
+  lock(s.lk)
   try
     #LSP.sp_flush(s.s,LSP.SP_BUF_BOTH)
     n_str = num2bel(n,1)
@@ -151,15 +150,15 @@ function inc_motor(s, n, steps)
     write(s.s,"I$n_str$str\n")
     res = wait2read(s.s)
     Log.printlog("Sol readed: ", res)
-    ind = findfirst(x -> x==n, mot_num)
+    ind = findfirst(x -> x==n, MOT_NUM)
     if ind != nothing s.motors[ind] += steps end
     return res
   finally
-    unlock(lk)
+    unlock(s.lk)
   end
 end
 function dec_motor(s, n, steps)
-  lock(lk)
+  lock(s.lk)
   try
     #LSP.sp_flush(s.s,LSP.SP_BUF_BOTH)
     n_str = num2bel(n,1)
@@ -168,27 +167,27 @@ function dec_motor(s, n, steps)
     write(s.s,"D$n_str$str\n")
     res = wait2read(s.s)
     Log.printlog("Sol readed: ", res)
-    ind = findfirst(x -> x==n, mot_num)
+    ind = findfirst(x -> x==n, MOT_NUM)
     if ind != nothing s.motors[ind] -= steps end
     return res
   finally
-    unlock(lk)
+    unlock(s.lk)
   end
 end
 
 function reset_motor(s, n)
-  lock(lk)
+  lock(s.lk)
   try
     #LSP.sp_flush(s.s,LSP.SP_BUF_BOTH)
     write(s.s,"R$n\n")
     return wait2read(s.s)
   finally
-    unlock(lk)
+    unlock(s.lk)
   end
 end
 
 function set_pos(s, motor, pos)
-    num = Sol.mot_num[motor]
+    num = MOT_NUM[motor]
     step0 = s.motors[motor]
     cal = s.mot_cals[motor]
     new_steps = cal.x2st(pos)
@@ -203,7 +202,7 @@ function set_pos(s, motor, pos)
 end
 
 function get_pos(s, motor)
-    num = Sol.mot_num[motor]
+    num = MOT_NUM[motor]
     steps = get_motor(s, num)
     cal = s.mot_cals[motor]
     pos = cal.st2x(steps)
@@ -227,13 +226,13 @@ end
 
 function set_wl(s, wl)
     tur_cal = s.mot_cals[2]
-    tur_pos = tur_cal.st2x(get_motor(s, Sol.mot_num[2])) # номер текущей решетки
+    tur_pos = tur_cal.st2x(get_motor(s, MOT_NUM[2])) # номер текущей решетки
     wl_cal = s.wl_cals[tur_pos]
     set_wl_steps(s, wl_cal.x2st(wl))
 end
 function get_wl(s)
     tur_cal = s.mot_cals[2]
-    tur_pos = tur_cal.st2x(get_motor(s, Sol.mot_num[2])) # номер текущей решетки
+    tur_pos = tur_cal.st2x(get_motor(s, MOT_NUM[2])) # номер текущей решетки
     wl_cal = s.wl_cals[tur_pos]
     wl_cal.st2x(get_wl_steps(s))
 end

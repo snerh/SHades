@@ -119,6 +119,39 @@ function device_loop(raw_dev, name::Symbol=:device)
         return nothing
     end
 
+    function _recover!()
+        _safe_disconnect!()
+        new_dev = call_with_timeout(() -> raw_dev.connect_device(), t)
+        if new_dev === :timeout
+            healthy = false
+            put!(event_ch, DeviceError("Recover connect timeout on $(name)"))
+            return false
+        elseif new_dev isa Exception
+            healthy = false
+            put!(event_ch, DeviceError("Recover connect error on $(name): $(sprint(showerror, new_dev))"))
+            return false
+        end
+
+        dev = new_dev
+        connected = true
+        initialized = false
+
+        init_res = call_with_timeout(() -> raw_dev.init_device(dev), t)
+        if init_res === :timeout
+            healthy = false
+            put!(event_ch, DeviceError("Recover init timeout on $(name)"))
+            return false
+        elseif init_res isa Exception
+            healthy = false
+            put!(event_ch, DeviceError("Recover init error on $(name): $(sprint(showerror, init_res))"))
+            return false
+        end
+
+        initialized = true
+        healthy = true
+        return true
+    end
+
     try
         for cmd in cmd_ch
             if cmd isa ConnectDevice
@@ -131,6 +164,10 @@ function device_loop(raw_dev, name::Symbol=:device)
                     healthy = false
                     put!(event_ch, DeviceError("Connect timeout on $(name)"))
                     put!(cmd.reply, :timeout)
+                elseif new_dev isa Exception
+                    healthy = false
+                    put!(event_ch, DeviceError("Connect error on $(name): $(sprint(showerror, new_dev))"))
+                    put!(cmd.reply, :error)
                 else
                     dev = new_dev
                     connected = true
@@ -153,6 +190,10 @@ function device_loop(raw_dev, name::Symbol=:device)
                     healthy = false
                     put!(event_ch, DeviceError("Init timeout on $(name)"))
                     put!(cmd.reply, :timeout)
+                elseif init_res isa Exception
+                    healthy = false
+                    put!(event_ch, DeviceError("Init error on $(name): $(sprint(showerror, init_res))"))
+                    put!(cmd.reply, :error)
                 else
                     initialized = true
                     put!(cmd.reply, :ok)
@@ -174,7 +215,41 @@ function device_loop(raw_dev, name::Symbol=:device)
                 if ok === :timeout
                     healthy = false
                     put!(event_ch, DeviceError("Timeout setting $(name).$(cmd.name)"))
-                    put!(cmd.reply, :timeout)
+                    if _recover!()
+                        ok2 = call_with_timeout(() -> raw_dev.set_param(dev, cmd.name, cmd.value), t)
+                        if ok2 === :timeout
+                            healthy = false
+                            put!(event_ch, DeviceError("Retry timeout setting $(name).$(cmd.name)"))
+                            put!(cmd.reply, :timeout)
+                        elseif ok2 isa Exception
+                            healthy = false
+                            put!(event_ch, DeviceError("Retry error setting $(name).$(cmd.name): $(sprint(showerror, ok2))"))
+                            put!(cmd.reply, :error)
+                        else
+                            put!(cmd.reply, :ok)
+                        end
+                    else
+                        put!(cmd.reply, :timeout)
+                    end
+                elseif ok isa Exception
+                    healthy = false
+                    put!(event_ch, DeviceError("Error setting $(name).$(cmd.name): $(sprint(showerror, ok))"))
+                    if _recover!()
+                        ok2 = call_with_timeout(() -> raw_dev.set_param(dev, cmd.name, cmd.value), t)
+                        if ok2 === :timeout
+                            healthy = false
+                            put!(event_ch, DeviceError("Retry timeout setting $(name).$(cmd.name)"))
+                            put!(cmd.reply, :timeout)
+                        elseif ok2 isa Exception
+                            healthy = false
+                            put!(event_ch, DeviceError("Retry error setting $(name).$(cmd.name): $(sprint(showerror, ok2))"))
+                            put!(cmd.reply, :error)
+                        else
+                            put!(cmd.reply, :ok)
+                        end
+                    else
+                        put!(cmd.reply, :error)
+                    end
                 else
                     put!(cmd.reply, :ok)
                 end
@@ -188,12 +263,53 @@ function device_loop(raw_dev, name::Symbol=:device)
                 if val === :timeout
                     healthy = false
                     put!(event_ch, DeviceError("Read timeout $(name).$(cmd.name)"))
-                    put!(cmd.reply, :timeout)
+                    if _recover!()
+                        val2 = call_with_timeout(() -> raw_dev.read_signal(dev, cmd.name), t)
+                        if val2 === :timeout
+                            healthy = false
+                            put!(event_ch, DeviceError("Retry read timeout $(name).$(cmd.name)"))
+                            put!(cmd.reply, :timeout)
+                        elseif val2 isa Exception
+                            healthy = false
+                            put!(event_ch, DeviceError("Retry read error $(name).$(cmd.name): $(sprint(showerror, val2))"))
+                            put!(cmd.reply, :error)
+                        else
+                            put!(cmd.reply, val2)
+                        end
+                    else
+                        put!(cmd.reply, :timeout)
+                    end
+                elseif val isa Exception
+                    healthy = false
+                    put!(event_ch, DeviceError("Read error $(name).$(cmd.name): $(sprint(showerror, val))"))
+                    if _recover!()
+                        val2 = call_with_timeout(() -> raw_dev.read_signal(dev, cmd.name), t)
+                        if val2 === :timeout
+                            healthy = false
+                            put!(event_ch, DeviceError("Retry read timeout $(name).$(cmd.name)"))
+                            put!(cmd.reply, :timeout)
+                        elseif val2 isa Exception
+                            healthy = false
+                            put!(event_ch, DeviceError("Retry read error $(name).$(cmd.name): $(sprint(showerror, val2))"))
+                            put!(cmd.reply, :error)
+                        else
+                            put!(cmd.reply, val2)
+                        end
+                    else
+                        put!(cmd.reply, :error)
+                    end
                 else
                     put!(cmd.reply, val)
                 end
 
             elseif cmd isa ShutdownDevice
+                if connected && dev !== nothing
+                    try
+                        raw_dev.abort_device(dev)
+                    catch ex
+                        put!(event_ch, DeviceError("Abort failed on $(name): $(sprint(showerror, ex))"))
+                    end
+                end
                 break
             end
         end
@@ -214,6 +330,7 @@ struct RawDevice
     init_device::Function
     set_param::Function
     read_signal::Function
+    abort_device::Function
     close_device::Function
     t::Float64 # seconds
     device_cmd::Channel{DeviceCommand}
@@ -251,6 +368,7 @@ function _mock_common_device()
             end
             return rand()
         end,
+        dev -> nothing,
         dev -> nothing,
         1.0,
         Channel{DeviceCommand}(32),
@@ -296,6 +414,7 @@ function MockCamDevice()
             return acc ./ frames
         end,
         dev -> nothing,
+        dev -> nothing,
         1.0,
         Channel{DeviceCommand}(32),
         Channel{SystemEvent}(32),
@@ -303,7 +422,11 @@ function MockCamDevice()
 end
 
 function call_with_timeout(f, timeout)
-    t = @async f()
+    t = @async try
+        f()
+    catch ex
+        ex
+    end
     status = timedwait(() -> istaskdone(t), timeout)
     if status == :ok
         return fetch(t)

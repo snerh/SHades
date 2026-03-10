@@ -30,6 +30,7 @@ mutable struct CameraState
     acq_time_s::Float64
     frames::Int
     temp_c::Union{Nothing,Float64}
+    scan_timeout_s::Float64
 end
 
 
@@ -103,6 +104,7 @@ function _make_device(
     init_device::Function,
     set_param::Function,
     read_signal::Function,
+    abort_device::Function,
     close_device::Function;
     timeout_s::Float64=5.0,
     cmd_size::Int=32,
@@ -113,6 +115,7 @@ function _make_device(
         init_device,
         set_param,
         read_signal,
+        abort_device,
         close_device,
         timeout_s,
         Channel{DeviceCommand}(cmd_size),
@@ -120,7 +123,7 @@ function _make_device(
     )
 end
 
-function LockinDevice(; port::AbstractString="COM6", timeout_s::Float64=2.0, target_power::Float64=1.0)
+function LockinDevice(; port::AbstractString="COM6", timeout_s::Float64=2.0)
     connect_device = () -> Lockin.open(port)
     init_device = dev -> (Lockin.init(dev); :ok)
     set_param = (dev, name, value) -> :ok
@@ -133,9 +136,10 @@ function LockinDevice(; port::AbstractString="COM6", timeout_s::Float64=2.0, tar
         end
         return nothing
     end
+    abort_device = dev -> nothing
     close_device = dev -> (Lockin.close(dev); nothing)
 
-    return _make_device(connect_device, init_device, set_param, read_signal, close_device; timeout_s=timeout_s)
+    return _make_device(connect_device, init_device, set_param, read_signal, abort_device, close_device; timeout_s=timeout_s)
 end
 
 function LaserDevice(
@@ -169,9 +173,10 @@ function LaserDevice(
         end
         return nothing
     end
+    abort_device = dev -> nothing
     close_device = dev -> nothing
 
-    return _make_device(connect_device, init_device, set_param, read_signal, close_device; timeout_s=timeout_s)
+    return _make_device(connect_device, init_device, set_param, read_signal, abort_device, close_device; timeout_s=timeout_s)
 end
 
 function SpectrometerDevice(; port::AbstractString="COM5", conf_dir::AbstractString=DEFAULT_SOL_CONF_DIR, timeout_s::Float64=2.0)
@@ -205,9 +210,10 @@ function SpectrometerDevice(; port::AbstractString="COM5", conf_dir::AbstractStr
         end
         return nothing
     end
+    abort_device = dev -> nothing
     close_device = dev -> (Sol.close(dev); nothing)
 
-    return _make_device(connect_device, init_device, set_param, read_signal, close_device; timeout_s=timeout_s)
+    return _make_device(connect_device, init_device, set_param, read_signal, abort_device, close_device; timeout_s=timeout_s)
 end
 
 function EllDevice(; port::AbstractString="COM4", preset_path::AbstractString=DEFAULT_ELL_PRESET, timeout_s::Float64=2.0)
@@ -250,25 +256,29 @@ function EllDevice(; port::AbstractString="COM4", preset_path::AbstractString=DE
         end
         return nothing
     end
+    abort_device = dev -> nothing
     close_device = dev -> (ELL.close(dev); nothing)
 
-    return _make_device(connect_device, init_device, set_param, read_signal, close_device; timeout_s=timeout_s)
+    return _make_device(connect_device, init_device, set_param, read_signal, abort_device, close_device; timeout_s=timeout_s)
 end
 
 function CameraDevice(
     ;
     ip::AbstractString="192.168.240.181",
-    timeout_s::Float64=5.0,
+    timeout_s::Float64=30.0,
+    psi_libpath::AbstractString=PSI.DEFAULT_LIBPATH,
+    scan_timeout_s::Float64=timeout_s,
     acq_time_s::Float64=0.1,
     frames::Int=1,
     temp_c::Union{Nothing,Float64}=nothing,
 )
-    state = CameraState(acq_time_s, max(frames, 1), temp_c)
+    state = CameraState(acq_time_s, max(frames, 1), temp_c, scan_timeout_s)
+    ctx = PSI.PSIContext(; libpath=psi_libpath)
 
     connect_device = () -> begin
-        ok = PSI.init()
+        ok = PSI.init(ctx)
         ok || error("PSI init failed")
-        return PSI.wait2open(ip)
+        return PSI.wait2open(ctx, ip)
     end
     init_device = dev -> begin
         PSI.set_params(dev, time=_sec_to_psi_time(state.acq_time_s))
@@ -294,8 +304,16 @@ function CameraDevice(
             frames = max(state.frames, 1)
             acc = Vector{Float64}()
             for i in 1:frames
-                PSI.start_scan(dev)
-                sleep(state.acq_time_s + 0.1)
+                status, param = PSI.wait_scan_complete(dev; timeout_s=state.scan_timeout_s, do_start=true)
+                if status == :timeout
+                    try
+                        PSI.abort_scan(dev)
+                    catch
+                    end
+                    error("PSI scan timeout")
+                elseif status == :error
+                    error("PSI scan error: code $(param)")
+                end
                 raw = Float64.(PSI.get_data(dev))
                 if i == 1
                     acc = raw
@@ -309,9 +327,16 @@ function CameraDevice(
         end
         return nothing
     end
+    abort_device = dev -> begin
+        try
+            PSI.abort_scan(dev)
+        catch
+        end
+        return nothing
+    end
     close_device = dev -> (PSI.close(dev); nothing)
 
-    return _make_device(connect_device, init_device, set_param, read_signal, close_device; timeout_s=timeout_s)
+    return _make_device(connect_device, init_device, set_param, read_signal, abort_device, close_device; timeout_s=timeout_s)
 end
 
 function build_real_devices(
@@ -322,6 +347,7 @@ function build_real_devices(
     sol_port::AbstractString="COM5",
     sol_conf_dir::AbstractString=DEFAULT_SOL_CONF_DIR,
     psi_ip::AbstractString="192.168.240.181",
+    psi_libpath::AbstractString=PSI.DEFAULT_LIBPATH,
     orpheus_test::Bool=false,
     orpheus_ip::AbstractString="",
     orpheus_port::AbstractString="",
@@ -330,7 +356,7 @@ function build_real_devices(
     laser = LaserDevice(; test=orpheus_test, ip=orpheus_ip, port=orpheus_port, id=orpheus_id)
     spec = SpectrometerDevice(; port=sol_port, conf_dir=sol_conf_dir)
     ell = EllDevice(; port=ell_port, preset_path=ell_preset_path)
-    cam = CameraDevice(; ip=psi_ip)
+    cam = CameraDevice(; ip=psi_ip, psi_libpath=psi_libpath)
     pd = LockinDevice(; port=lockin_port)
 
     devices = RawDevice[laser, spec, ell, cam, pd]

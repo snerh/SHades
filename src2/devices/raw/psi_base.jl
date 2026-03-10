@@ -1,92 +1,210 @@
 module PSI
 include("Log.jl")
 
-PSI_CCD_UNIT_NSEK   = 0
-PSI_CCD_UNIT_MKS    = 1
-PSI_CCD_UNIT_MSEK   = 2
-PSI_CCD_UNIT_SEK    = 3
-PSI_CCD_UNIT_MIN    = 4
-PSI_CCD_UNIT_HOURS  = 5
+const PSI_CCD_UNIT_NSEK   = 0
+const PSI_CCD_UNIT_MKS    = 1
+const PSI_CCD_UNIT_MSEK   = 2
+const PSI_CCD_UNIT_SEK    = 3
+const PSI_CCD_UNIT_MIN    = 4
+const PSI_CCD_UNIT_HOURS  = 5
 
-psi = "C:\\work\\soft\\SHades\\psi_ccd5.dll"
+const PSI_CMD_ACK_ERROR = 5
+const PSI_CMD_SCAN_START = 301
 
-function init()
-	Log.printlog("psi file = ", psi)
-    err = @ccall psi.psiccd3_Init()::Cuchar
-    err == 0
+const DEFAULT_LIBPATH = "C:\\work\\soft\\SHades\\psi_ccd5.dll"
+
+struct PSIContext
+    libpath::String
+end
+PSIContext(; libpath::AbstractString=DEFAULT_LIBPATH) = PSIContext(String(libpath))
+
+struct PSIDevice
+    ctx::PSIContext
+    id::Int32
 end
 
-function wait2open(ip = "192.168.240.181")
-    cam_id = Ref{Cint}(0)
-    err = @ccall psi.psiccd3_Wait2OpenDevice(ip::Cstring,cam_id::Ref{Cint})::Cint
-    err == 0 ? cam_id.x : error("psiccd3_Wait2OpenDevice error")
+const _cb_lock = ReentrantLock()
+const _cb_channels = Dict{Int32,Channel{Tuple{Int32,Int32}}}()
+const _cb_installed = Ref(false)
+const _cb_ptr = Ref{Ptr{Cvoid}}(C_NULL)
+
+function _device_callback(iDevNum::Cint, lEvent::Cint, lParam1::Cint, lParam2::Cint)::Cint
+    ch = nothing
+    lock(_cb_lock)
+    ch = get(_cb_channels, Int32(iDevNum), nothing)
+    unlock(_cb_lock)
+
+    if ch !== nothing && isopen(ch)
+        if !isready(ch)
+            try
+                put!(ch, (Int32(lEvent), Int32(lParam1)))
+            catch
+            end
+        end
+    end
+    return 0
 end
 
-function close(id)
-    err = @ccall psi.psiccd3_CloseDevice(id::Cint)::Cint
-    err == 0 ? id : error("psiccd3_CloseDevice error")
+function _ensure_callback!(ctx::PSIContext)
+    if _cb_installed[]
+        return nothing
+    end
+    _cb_ptr[] = @cfunction(_device_callback, Cint, (Cint, Cint, Cint, Cint))
+    err = ccall((:psiccd3_SetCallback, ctx.libpath), Cint, (Ptr{Cvoid},), _cb_ptr[])
+    err == 0 || error("psiccd3_SetCallback error: $err")
+    _cb_installed[] = true
+    return nothing
 end
 
-function f()
+function register_scan_channel!(dev::PSIDevice, ch::Channel{Tuple{Int32,Int32}})
+    _ensure_callback!(dev.ctx)
+    lock(_cb_lock)
+    _cb_channels[Int32(dev.id)] = ch
+    unlock(_cb_lock)
+    return nothing
 end
 
-function set_callbacka(f)
-    fptr = @cfunction(f,Cint,(Cint,Cint,Cint,Cint))
-    err = @ccall psi.psiccd3_SetCallback(fptr::Ptr{Cvoid})::Cint
-    err == 0 ? () : error("psiccd3_SetCallback error")
+function unregister_scan_channel!(dev::PSIDevice)
+    lock(_cb_lock)
+    pop!(_cb_channels, Int32(dev.id), nothing)
+    unlock(_cb_lock)
+    return nothing
 end
 
-function start_scan(id, FPGA = 0, sensor = 0)
-    err = @ccall psi.psiccd3_StartScan(id::Cint, FPGA::Cushort, sensor::Cushort)::Cint
-    err == 0 ? () : error("psiccd3_StartScan error")
-end
-
-function get_data(id, FPGA = 0, sensor = 0, frames = 1, ROImask = 1)
-    x, y = get_dims(id)
-    buff = Vector{Cushort}(undef, frames * x * y)
-    p = pointer(buff)
-    #Log.printlog(p)
-    #Log.printlog(buff[1:10])
-    err = @ccall psi.psiccd3_GetData(id::Cint, FPGA::Cushort, sensor::Cushort, frames::Cushort, ROImask::Cushort,Ref(p)::Ref{Ptr{Cushort}})::Cint
-    if err == 0
-        #Log.printlog(buff[1:10])
-        buff
-    else
-        error("pscccd3_GetData error")
+function wait_scan_complete(dev::PSIDevice; timeout_s::Float64=5.0, do_start::Bool=false, FPGA::Integer=0, sensor::Integer=0)
+    ch = Channel{Tuple{Int32,Int32}}(1)
+    register_scan_channel!(dev, ch)
+    try
+        if do_start
+            start_scan(dev, FPGA, sensor)
+        end
+        t0 = time()
+        while true
+            if isready(ch)
+                ev, param = take!(ch)
+                if ev == PSI_CMD_ACK_ERROR
+                    return (:error, Int(param))
+                elseif ev == PSI_CMD_SCAN_START
+                    return (:ok, Int(param))
+                end
+            elseif (time() - t0) > timeout_s
+                return (:timeout, 0)
+            else
+                sleep(0.01)
+            end
+        end
+    finally
+        unregister_scan_channel!(dev)
     end
 end
 
-function get_params(id, FPGA = 0, sensor = 0)
-    size = 32 + 18*8 + 24 + (48+32)
-    buf = Vector{Cushort}(undef, Int(size/2))
-    err = @ccall psi.psiccd3_GetSensorParams(id::Cint, FPGA::Cushort, sensor::Cushort, buf::Ref{Cushort})::Cint
+function init(ctx::PSIContext)
+    Log.printlog("psi file = ", ctx.libpath)
+    err = ccall((:psiccd3_Init, ctx.libpath), Cuchar, ())
+    return err == 0
+end
+
+function wait2open(ctx::PSIContext, ip::AbstractString="192.168.240.181")
+    cam_id = Ref{Cint}(0)
+    err = ccall((:psiccd3_Wait2OpenDevice, ctx.libpath), Cint, (Cstring, Ref{Cint}), ip, cam_id)
+    err == 0 ? PSIDevice(ctx, Int32(cam_id[])) : error("psiccd3_Wait2OpenDevice error")
+end
+
+function close(dev::PSIDevice)
+    err = ccall((:psiccd3_CloseDevice, dev.ctx.libpath), Cint, (Cint,), dev.id)
+    err == 0 ? dev : error("psiccd3_CloseDevice error")
+end
+
+function start_scan(dev::PSIDevice, FPGA::Integer=0, sensor::Integer=0)
+    err = ccall((:psiccd3_StartScan, dev.ctx.libpath), Cint, (Cint, Cushort, Cushort), dev.id, FPGA, sensor)
+    err == 0 ? nothing : error("psiccd3_StartScan error")
+end
+
+function stop_scan(dev::PSIDevice, FPGA::Integer=0, sensor::Integer=0)
+    err = ccall((:psiccd3_StopScan, dev.ctx.libpath), Cint, (Cint, Cushort, Cushort), dev.id, FPGA, sensor)
+    err == 0 ? nothing : error("psiccd3_StopScan error")
+end
+
+function abort_scan(dev::PSIDevice, FPGA::Integer=0, sensor::Integer=0)
+    err = ccall((:psiccd3_AbortScan, dev.ctx.libpath), Cint, (Cint, Cushort, Cushort), dev.id, FPGA, sensor)
+    err == 0 ? nothing : error("psiccd3_AbortScan error")
+end
+
+function get_data(dev::PSIDevice, FPGA::Integer=0, sensor::Integer=0, frames::Integer=1, ROImask::Integer=1)
+    x, y = get_dims(dev, FPGA, sensor)
+    buff = Vector{Cushort}(undef, frames * x * y)
+    pref = Ref{Ptr{Cushort}}(pointer(buff))
+    err = ccall(
+        (:psiccd3_GetData, dev.ctx.libpath),
+        Cint,
+        (Cint, Cushort, Cushort, Cushort, Cushort, Ref{Ptr{Cushort}}),
+        dev.id,
+        FPGA,
+        sensor,
+        frames,
+        ROImask,
+        pref,
+    )
+    if err == 0
+        return buff
+    end
+    error("pscccd3_GetData error")
+end
+
+function get_params(dev::PSIDevice, FPGA::Integer=0, sensor::Integer=0)
+    size = 32 + 18 * 8 + 24 + (48 + 32)
+    buf = Vector{Cushort}(undef, Int(size / 2))
+    err = ccall(
+        (:psiccd3_GetSensorParams, dev.ctx.libpath),
+        Cint,
+        (Cint, Cushort, Cushort, Ref{Cushort}),
+        dev.id,
+        FPGA,
+        sensor,
+        buf,
+    )
     err == 0 ? buf : error("psiccd3_GetSensorParams error")
 end
 
-function get_temp(id, FPGA = 0,  th_element = 0)
+function get_temp(dev::PSIDevice, FPGA::Integer=0, th_element::Integer=0)
     ref = Ref(Cint(-100))
-    err = @ccall psi.psiccd3_GetThermoelementParams(id::Cint, FPGA::Cushort, th_element::Cushort, ref::Ref{Cint})::Cint
-    err == 0 ? ref.x : error("psiccd3_GetThermoelementParams error")
+    err = ccall(
+        (:psiccd3_GetThermoelementParams, dev.ctx.libpath),
+        Cint,
+        (Cint, Cushort, Cushort, Ref{Cint}),
+        dev.id,
+        FPGA,
+        th_element,
+        ref,
+    )
+    err == 0 ? ref[] : error("psiccd3_GetThermoelementParams error")
 end
 
-function set_temp(id, FPGA = 0,  th_element = 0; temp = 20)
-    err = @ccall psi.psiccd3_SetThermoelementParams(id::Cint, FPGA::Cushort, th_element::Cushort, Ref(Cint(temp))::Ref{Cint})::Cint
-    err == 0 ? () : error("psiccd3_SetThermoelementParams error")
+function set_temp(dev::PSIDevice, FPGA::Integer=0, th_element::Integer=0; temp::Integer=20)
+    err = ccall(
+        (:psiccd3_SetThermoelementParams, dev.ctx.libpath),
+        Cint,
+        (Cint, Cushort, Cushort, Ref{Cint}),
+        dev.id,
+        FPGA,
+        th_element,
+        Ref(Cint(temp)),
+    )
+    err == 0 ? nothing : error("psiccd3_SetThermoelementParams error")
 end
 
-function get_dims(id, FPGA = 0, sensor = 0)
-    buf = get_params(id, FPGA, sensor)
-    roi_w = buf[20]-buf[18]+1
-    roi_h = buf[21]-buf[19]+1
+function get_dims(dev::PSIDevice, FPGA::Integer=0, sensor::Integer=0)
+    buf = get_params(dev, FPGA, sensor)
+    roi_w = buf[20] - buf[18] + 1
+    roi_h = buf[21] - buf[19] + 1
     bin_w = buf[24]
     bin_h = buf[23]
-    (2048,1) # заглушка
-    Int.(round.( (roi_w/bin_w, roi_h/bin_h) ))
+    Int.(round.((roi_w / bin_w, roi_h / bin_h)))
 end
 
-function set_params(id, FPGA = 0, sensor = 0; time::Union{Nothing,Tuple{Int,String}} = nothing)
-    buf = get_params(id, FPGA, sensor)
-    if time != nothing
+function set_params(dev::PSIDevice, FPGA::Integer=0, sensor::Integer=0; time::Union{Nothing,Tuple{Int,String}}=nothing)
+    buf = get_params(dev, FPGA, sensor)
+    if time !== nothing
         x, unit = time
         Log.printlog(time)
         buf[95] = x
@@ -106,14 +224,22 @@ function set_params(id, FPGA = 0, sensor = 0; time::Union{Nothing,Tuple{Int,Stri
             error("set_params error: unknown time unit")
         end
     end
-    # overwrite POI to spectrum 2048x1
-    spectrum_roi::Vector{Cushort} = [0,0,2047,121,0,122,1,4096,0]
-    p = view(buf,18:26)
+    # overwrite ROI to spectrum 2048x1
+    spectrum_roi::Vector{Cushort} = [0, 0, 2047, 121, 0, 122, 1, 4096, 0]
+    p = view(buf, 18:26)
     copy!(p, spectrum_roi)
 
-    err = @ccall psi.psiccd3_SetSensorParams(id::Cint, FPGA::Cushort, sensor::Cushort, buf::Ref{Cushort})::Cint
+    err = ccall(
+        (:psiccd3_SetSensorParams, dev.ctx.libpath),
+        Cint,
+        (Cint, Cushort, Cushort, Ref{Cushort}),
+        dev.id,
+        FPGA,
+        sensor,
+        buf,
+    )
     err == 0 ? buf : error("psiccd3_SetSensorParams error :$err")
-    ()
-end        
+    return nothing
+end
 
 end #module
