@@ -422,7 +422,7 @@ function start_gtk_ui!(
     state.scan_params = build_scan_axis_set_from_text_specs(raw_p)
 
     win = Gtk.Window(String(title), 980, 700)
-    root = Gtk.Box(:v, 10)
+    root = Gtk.Box(:v, 8)
 
     status_label = Gtk.Label("measurement: $(state.measurement_state)")
     device_label = Gtk.Label(state.device_status)
@@ -430,38 +430,33 @@ function start_gtk_ui!(
     points_label = Gtk.Label("points: 0")
     file_label = Gtk.Label("saved: -")
     dir_label = Gtk.Label("dir: $(state.app_config.dir)")
-    header = Gtk.Box(:v, 4)
-    push!(header, status_label)
-    push!(header, device_label)
-    push!(header, power_label)
-    push!(header, points_label)
-    push!(header, file_label)
-    push!(header, dir_label)
 
     form, entries = _build_form_box(raw_p, event_ch)
 
     connect_btn = Gtk.Button("Connect")
     init_btn = Gtk.Button("Init")
     disconnect_btn = Gtk.Button("Disconnect")
-    pick_dir_btn = Gtk.Button("Dir")
+    pick_dir_btn = Gtk.Button("Output Dir")
     scan_btn = Gtk.Button("Scan")
     focus_btn = Gtk.Button("Focus")
     stop_btn = Gtk.Button("Stop")
-    power_btn = Gtk.ToggleButton("Power stab")
-    save_dat_btn = Gtk.Button("Save DAT")
-    save_png_btn = Gtk.Button("Save PNG")
+    power_btn = Gtk.ToggleButton("Power Stabilization")
+    save_dat_btn = Gtk.MenuItem("Save DAT")
+    save_png_btn = Gtk.MenuItem("Save PNG")
 
-    controls = Gtk.Box(:h, 8)
-    push!(controls, connect_btn)
-    push!(controls, init_btn)
-    push!(controls, disconnect_btn)
-    push!(controls, pick_dir_btn)
-    push!(controls, scan_btn)
-    push!(controls, focus_btn)
-    push!(controls, stop_btn)
-    push!(controls, power_btn)
-    push!(controls, save_dat_btn)
-    push!(controls, save_png_btn)
+    device_controls = Gtk.Box(:h, 8)
+    push!(device_controls, connect_btn)
+    push!(device_controls, init_btn)
+    push!(device_controls, disconnect_btn)
+    
+    device_controls2 = Gtk.Box(:h, 8)
+    push!(device_controls2, power_btn)
+    push!(device_controls2, pick_dir_btn)
+
+    measurement_controls = Gtk.Box(:h, 8)
+    push!(measurement_controls, scan_btn)
+    push!(measurement_controls, focus_btn)
+    push!(measurement_controls, stop_btn)
 
     xbox = Gtk.ComboBoxText()
     ybox = Gtk.ComboBoxText()
@@ -496,20 +491,74 @@ function start_gtk_ui!(
 
     canvas_signal = Gtk.GtkCanvas(100, 100)
     canvas_raw = Gtk.GtkCanvas(100, 100)
-    paned = Gtk.Paned(:h)
-    paned[1] = canvas_signal
-    paned[2] = canvas_raw
-    Gtk.signal_connect((w, alloc) -> Gtk.set_gtk_property!(w, :position, alloc.width ÷ 2), paned, "size-allocate")
-    # Настройка для полного использования пространства
-    Gtk.set_gtk_property!(paned, :expand, true)
-    Gtk.set_gtk_property!(paned, :shrink, true)
+    plot_menu = Gtk.Menu()
+    push!(plot_menu, save_dat_btn)
+    push!(plot_menu, save_png_btn)
+    Gtk.showall(plot_menu)
+    plots_paned = Gtk.Paned(:v)
+    plots_paned[1] = canvas_signal
+    plots_paned[2] = canvas_raw
+    Gtk.signal_connect((w, alloc) -> Gtk.set_gtk_property!(w, :position, alloc.height ÷ 2), plots_paned, "size-allocate")
+    Gtk.set_gtk_property!(plots_paned, :expand, true)
+    Gtk.set_gtk_property!(plots_paned, :shrink, true)
+    canvas_signal.mouse.button3press = (widget, event) -> Gtk.popup(plot_menu, event)
+    canvas_raw.mouse.button3press = (widget, event) -> Gtk.popup(plot_menu, event)
 
+    params_scroller = Gtk.Box(:h)
+    #Gtk.set_gtk_property!(params_scroller, :vexpand, true)
+    Gtk.set_gtk_property!(params_scroller, :vexpand, true)
+    Gtk.set_gtk_property!(params_scroller, :hshrink, true)
+    push!(params_scroller, form)
 
-    push!(root, header)
-    push!(root, controls)
-    push!(root, form)
-    push!(root, plot_controls)
-    push!(root, paned)
+    params_expander = Gtk.Expander("Parameters")
+    Gtk.set_gtk_property!(params_expander, :expanded, true)
+    push!(params_expander, params_scroller)
+
+    device_expander = Gtk.Expander("Devices")
+    Gtk.set_gtk_property!(device_expander, :expanded, true)
+    push!(device_expander, device_controls)
+
+    measurement_expander = Gtk.Expander("Measurement")
+    measurement_expander_panel = Gtk.Box(:v,8)
+    Gtk.set_gtk_property!(measurement_expander, :expanded, true)
+    push!(measurement_expander, measurement_expander_panel)
+    push!(measurement_expander_panel, measurement_controls)
+    push!(measurement_expander_panel, device_controls2)
+
+    plot_expander = Gtk.Expander("Plot Settings")
+    Gtk.set_gtk_property!(plot_expander, :expanded, true)
+    push!(plot_expander, plot_controls)
+
+    left_col = Gtk.Box(:v, 8)
+    push!(left_col, device_expander)
+    push!(left_col, measurement_expander)
+    push!(left_col, params_expander)
+
+    right_col = Gtk.Box(:v, 8)
+    push!(right_col, plot_expander)
+    push!(right_col, plots_paned)
+
+    main_paned = Gtk.Box(:h)
+    push!(main_paned, left_col)
+    push!(main_paned, right_col)
+    #main_paned[1] = left_col
+    #main_paned[2] = right_col
+    #Gtk.signal_connect((w, alloc) -> Gtk.set_gtk_property!(w, :position, Int(alloc.width * 0.35)), main_paned, "size-allocate")
+    Gtk.set_gtk_property!(main_paned, :expand, true)
+    Gtk.set_gtk_property!(main_paned, :shrink, true)
+
+    status_bar = Gtk.Box(:h, 8)
+    push!(status_bar, status_label)
+    push!(status_bar, device_label)
+    push!(status_bar, power_label)
+    push!(status_bar, points_label)
+    push!(status_bar, file_label)
+    push!(status_bar, dir_label)
+    
+    Gtk.set_gtk_property!(status_bar, :shrink, true)
+
+    push!(root, main_paned)
+    push!(root, status_bar)
     push!(win, root)
 
     ui = GtkApp(
@@ -697,7 +746,7 @@ function start_gtk_ui!(
         return nothing
     end
 
-    Gtk.signal_connect(save_dat_btn, "clicked") do _
+    Gtk.signal_connect(save_dat_btn, "activate") do _
         pts = _signal_points(state)
         println(pts)
         println(typeof(pts))
@@ -718,7 +767,7 @@ function start_gtk_ui!(
         return nothing
     end
 
-    Gtk.signal_connect(save_png_btn, "clicked") do _
+    Gtk.signal_connect(save_png_btn, "activate") do _
         pts = _signal_points(state)
         isempty(pts) && return nothing
         path = Gtk.save_dialog("Save spectrum .png", win)
