@@ -27,7 +27,8 @@ end
 function _axis_values(points::Vector{Point}, xaxis::Symbol, yaxis::Symbol)
     xs = Float64[]
     ys = Float64[]
-    for p in points
+    sorted = sort(points, lt = ((x,y) -> _point_axis(x, xaxis) < _point_axis(y, xaxis)))
+    for p in sorted
         x = _point_axis(p, xaxis)
         y = _point_axis(p, yaxis)
         if isfinite(x) && isfinite(y)

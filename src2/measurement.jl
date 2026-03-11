@@ -1,12 +1,14 @@
 module Measurement
 
 using Statistics
+using JSON
 using ..Domain
 using ..Parameters
 using ..DeviceManager
 
 export MeasurementCommand, StartMeasurement, StopMeasurement, ShutdownMeasurement, UpdateMeasurementParams
 export measurement_loop, MeasurementStarted, MeasurementStep, MeasurementDone, MeasurementStopped
+export DirChosen
 
 abstract type MeasurementCommand end
 
@@ -20,6 +22,10 @@ struct StopMeasurement <: MeasurementCommand end
 struct ShutdownMeasurement <: MeasurementCommand end
 struct UpdateMeasurementParams <: MeasurementCommand
     params::Dict{Symbol,Any}
+end
+
+struct DirChosen <: SystemEvent
+    dir::Union{Nothing,String}
 end
 
 struct MeasurementStarted <: SystemEvent
@@ -86,17 +92,10 @@ end
 
 _fname_atom(v) = replace(string(v), r"[^0-9A-Za-z._-]+" => "_")
 
-function _encode_header(params::Dict{Symbol,Any})
-    chunks = String[]
-    for (k, v) in sort(collect(params); by=first)
-        push!(chunks, "$(String(k))=$(repr(v))")
-    end
-    return join(chunks, ";")
-end
-
 function _save_raw_file(path::AbstractString, params::Dict{Symbol,Any}, data::Vector{Float64})
+    json = JSON.json(params)
     open(path, "w") do io
-        println(io, "# ", _encode_header(params))
+        println(io, "# ", json)
         for y in data
             println(io, y)
         end
@@ -107,6 +106,9 @@ end
 function _load_raw_file(path::AbstractString)
     data = Float64[]
     open(path, "r") do io
+        s = readline(io)
+        point = Dict(JSON.parse(s[2:end],Dict{Symbol,Any}))
+        println(point)
         for line in eachline(io)
             s = strip(line)
             isempty(s) && continue
@@ -116,22 +118,47 @@ function _load_raw_file(path::AbstractString)
             catch
             end
         end
+        return (point, data)
     end
-    return data
+end
+
+function import_dir(path::AbstractString)
+	files = readdir(path,join = true,sort = true)
+    dat_files = filter(x -> x[end-3:end]==".dat",files)
+    if length(dat_files) == 0
+        return nothing
+    end
+    function aux(file)
+        point, data = _load_raw_file(file)
+        new_p = new_point(point, data)
+        new_p
+    end
+    full_list = map(aux, dat_files)
+    return full_list
 end
 
 function _as_seconds(v)
-    v isa Number && return Float64(v)
-    s = strip(String(v))
-    m = match(r"^([-+]?(?:\d+(?:\.\d*)?|\.\d+))\s*(us|ms|s)?$", s)
-    m === nothing && return 0.1
-    val = parse(Float64, m.captures[1])
-    unit = m.captures[2]
-    unit === nothing && return val
-    unit == "s" && return val
-    unit == "ms" && return val / 1000.0
-    unit == "us" && return val / 1_000_000.0
-    return val
+    if v isa Number
+        return Float64(v)
+    elseif v isa String
+        s = strip(String(v))
+        m = match(r"^([-+]?(?:\d+(?:\.\d*)?|\.\d+))\s*(us|ms|s)?$", s)
+        m === nothing && return 0.1
+        val = parse(Float64, m.captures[1])
+        unit = m.captures[2]
+        unit === nothing && return val
+        unit == "s" && return val
+        unit == "ms" && return val / 1000.0
+        unit == "us" && return val / 1_000_000.0
+        return val
+    elseif v isa Vector{Any}
+        val = v[1]
+        unit = v[2]
+        unit == "s" && return val
+        unit == "ms" && return val / 1000.0
+        unit == "us" && return val / 1_000_000.0
+    end
+
 end
 
 _frames(p::Dict{Symbol,Any}) = Int(round(Float64(get(p, :frames, 1))))
@@ -293,6 +320,17 @@ function _point_wl(p::Dict{Symbol,Any}, fallback::Int)
     return Float64(fallback)
 end
 
+function new_point(p, data)
+    new_p = copy(p)
+    sig = isempty(data) ? NaN : maximum(data) - median(data)
+    t_s = _as_seconds(get(p, :acq_time, get(p, :time_s, 0.1)))
+    
+    new_p = copy(p)
+    new_p[:time_s] = t_s
+    new_p[:sig] = sig
+    return new_p
+end
+
 function _measurement_step!(
     event_ch,
     manager,
@@ -303,15 +341,15 @@ function _measurement_step!(
     stem::String="point"
 )
     p = copy(point)
-    _normalize_params!(p)
+    #_normalize_params!(p)
     ctx.oldp = _apply_new_params!(ctx.oldp, p, manager)
 
     file_path = output_dir === nothing ? nothing : joinpath(output_dir, "$(stem).dat")
     reused = false
     data = Float64[]
 
-    if file_path !== nothing && isfile(file_path)
-        data = _load_raw_file(file_path)
+    if file_path !== nothing && isfile(file_path) && False
+        (p, data) = _load_raw_file(file_path)
         reused = true
     else
         delay_s = Float64(get(p, :delay_s, 1.5))
@@ -319,20 +357,16 @@ function _measurement_step!(
         data = _acquire_with_back(manager, p, ctx.back)
     end
 
-    sig = isempty(data) ? NaN : maximum(data) - median(data)
-    wl = _point_wl(p, step_index)
-    t_s = _as_seconds(get(p, :acq_time, get(p, :time_s, 0.1)))
     real_power = try
         Float64(_read_signal(manager, :pd, :power))
     catch
         NaN
     end
 
-    point_payload = copy(p)
-    point_payload[:wl] = wl
-    point_payload[:time_s] = t_s
-    point_payload[:real_power] = real_power
-    point_payload[:sig] = sig
+    point_payload = new_point(p, data)
+    point_payload[:real_power] = real_power   
+    sig = point_payload[:sig]
+    wl = point_payload[:wl] 
 
     if !reused && file_path !== nothing
         _save_raw_file(file_path, point_payload, data)

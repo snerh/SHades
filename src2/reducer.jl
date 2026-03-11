@@ -30,6 +30,11 @@ function reduce!(state::AppState, ev)
 
     elseif ev isa MeasurementStopped
         state.measurement_state = State.Idle
+    
+    elseif ev isa DirChosen
+        state.app_config.dir = ev.dir
+        state.points = Vector{Dict{Symbol,Any}}(Measurement.import_dir(ev.dir))
+        println(typeof(state.points))
 
     elseif ev isa LaserPowerUpdate
         state.current_power = ev.power

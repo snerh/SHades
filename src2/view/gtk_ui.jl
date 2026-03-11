@@ -7,7 +7,7 @@ using ..Parameters
 using ..Persistence
 using ..ParameterParser
 using ..DeviceManager: SystemEvent, DeviceHub, connect_devices!, init_devices!, disconnect_devices!, devices_status
-using ..Measurement: MeasurementCommand, StartMeasurement, StopMeasurement, UpdateMeasurementParams
+using ..Measurement: MeasurementCommand, StartMeasurement, StopMeasurement, UpdateMeasurementParams, DirChosen
 using ..Power: PowerCommand, StartStab, StopStab
 using ..Processing: save_plot_dat, save_plot_png
 using ..PlotRender: DEFAULT_AXIS_CHOICES, render_signal_plot!
@@ -238,7 +238,7 @@ end
 
 function _active_text(box, fallback::AbstractString)
     t = Gtk.GAccessor.active_text(box)
-    t === nothing && return String(fallback)
+    (t === nothing || t == C_NULL) && return String(fallback)
     return Gtk.bytestring(t)
 end
 
@@ -606,7 +606,7 @@ function start_gtk_ui!(
         path = Gtk.open_dialog("Select output folder", win, action=Gtk.GtkFileChooserAction.SELECT_FOLDER)
         path === nothing && return nothing
         chosen = isdir(path) ? path : dirname(path)
-        state.app_config.dir = chosen
+        put!(event_ch, DirChosen(chosen))
         render!(ui, state)
         return nothing
     end
@@ -699,6 +699,8 @@ function start_gtk_ui!(
 
     Gtk.signal_connect(save_dat_btn, "clicked") do _
         pts = _signal_points(state)
+        println(pts)
+        println(typeof(pts))
         isempty(pts) && return nothing
         path = Gtk.save_dialog("Save spectrum .dat", win)
         path === nothing && return nothing
