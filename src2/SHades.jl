@@ -5,11 +5,16 @@ include("parameters.jl")
 include("parameters_parser.jl")
 include("state.jl")
 include("device_manager.jl")
+include("app_events.jl")
+include("time_utils.jl")
+include("dataset_io.jl")
 include("measurement.jl")
 include("power.jl")
 include("view/plot_render.jl")
 include("processing.jl")
 include("persistence.jl")
+include("app_logic.jl")
+include("app_controller.jl")
 include("view/gtk_ui.jl")
 include("reducer.jl")
 include("devices/raw/raw_devices.jl")
@@ -19,10 +24,16 @@ using .Parameters
 using .ParameterParser
 using .State
 using .DeviceManager
+using .AppEvents
+using .TimeUtils
+using .DatasetIO
 using .Measurement
 using .Power
 using .Processing
+using .Persistence
 using .PlotRender
+using .AppLogic
+using .AppController
 using .Reducer
 using .GtkUI
 using .RawDevices
@@ -189,12 +200,21 @@ stop_measurement!(runtime::AppRuntime) = put!(runtime.meas_cmd, StopMeasurement(
 start_gtk_ui!(runtime::AppRuntime; config_path::AbstractString="preset.json", title::AbstractString="SHades2.0") =
     GtkUI.start_gtk_ui!(
         runtime.state,
-        runtime.ui_events,
         runtime.ui_cmd,
-        runtime.meas_cmd,
-        runtime.power_cmd,
-        runtime.device_hub;
-        config_path=config_path,
+        AppController.Controller(
+            runtime.ui_events,
+            runtime.meas_cmd,
+            runtime.power_cmd,
+            runtime.device_hub,
+            dir -> DatasetIO.import_dir(dir, Measurement.new_point),
+            () -> Persistence.load_presets(config_path),
+            presets -> Persistence.save_presets(config_path, presets),
+            (params, output_dir) -> StartMeasurement(params, output_dir),
+            () -> StopMeasurement(),
+            params -> UpdateMeasurementParams(params),
+            () -> StartStab(),
+            () -> StopStab(),
+        );
         title=title,
     )
 

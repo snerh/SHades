@@ -3,29 +3,14 @@ module GtkUI
 import Gtk
 
 using ..State
-using ..Parameters
-using ..Persistence
-using ..ParameterParser
-using ..DeviceManager: SystemEvent, DeviceHub, connect_devices!, init_devices!, disconnect_devices!, devices_status
-using ..Measurement: MeasurementCommand, StartMeasurement, StopMeasurement, UpdateMeasurementParams, DirChosen
-using ..Power: PowerCommand, StartStab, StopStab
+using ..AppLogic: is_measurement_active, is_focus_mode, signal_points, raw_points
+using ..AppController: Controller, load_presets!, append_preset!, delete_preset_at!, build_preset, dispatch_raw_params!, validation_errors, publish_focus_params!, refresh_lifecycle!, connect_devices!, init_devices!, disconnect_devices!, toggle_power_stabilization!, select_output_dir!, start_scan!, start_focus!, stop_measurement!
 using ..Processing: save_plot_dat, save_plot_png
 using ..PlotRender: DEFAULT_AXIS_CHOICES, render_signal_plot!
 
-export SetParam, AxisEntry, GtkApp, start_gtk_ui!, render!, test_gtk
+export AxisEntry, GtkApp, start_gtk_ui!, render!, test_gtk
 
 const _GTK_CSS_PRIORITY_APPLICATION = Cuint(800)
-
-struct SetParam <: SystemEvent
-    name::Symbol
-    val::String
-end
-
-struct SetDeviceLifecycle <: SystemEvent
-    connected::Bool
-    initialized::Bool
-    message::String
-end
 
 mutable struct AxisEntry
     name::Symbol
@@ -60,19 +45,10 @@ mutable struct GtkApp
     canvas_raw::Any
 end
 
-function AxisEntry(name::Symbol, event_ch, init_str::AbstractString)
+function AxisEntry(name::Symbol, init_str::AbstractString)
     gtk = Gtk
     entry = gtk.Entry()
     gtk.set_gtk_property!(entry, :text, String(init_str))
-
-    function callback(_...)
-        text = gtk.get_gtk_property(entry, "text", String)
-        put!(event_ch, SetParam(name, text))
-        return nothing
-    end
-
-    gtk.signal_connect(callback, entry, "activate")
-    gtk.signal_connect(callback, entry, "editing-done")
     return AxisEntry(name, entry)
 end
 
@@ -144,7 +120,7 @@ function _gtk_apply_errors!(entries::Dict{Symbol,AxisEntry}, errs::Dict{Symbol,S
     return nothing
 end
 
-function _build_form_box(raw_params::Vector{Pair{Symbol,String}}, event_ch)
+function _build_form_box(raw_params::Vector{Pair{Symbol,String}})
     gtk = Gtk
     form = gtk.Box(:v, 6)
     entries = Dict{Symbol,AxisEntry}()
@@ -152,7 +128,7 @@ function _build_form_box(raw_params::Vector{Pair{Symbol,String}}, event_ch)
     for (name, value) in raw_params
         row = gtk.Box(:h, 8)
         label = gtk.Label(String(name))
-        entry = AxisEntry(name, event_ch, value)
+        entry = AxisEntry(name, value)
         gtk.set_gtk_property!(label, :xalign, 0.0)
         gtk.set_gtk_property!(label, :width_request, 110)
         push!(row, label)
@@ -173,56 +149,16 @@ function _collect_raw_params(entries::Dict{Symbol,AxisEntry}, template::Vector{P
     return out
 end
 
-function _collect_fixed_params(raw_params::Vector{Pair{Symbol,String}})
-    out = Dict{Symbol,Any}()
-    for (name, spec) in raw_params
-        ax = try
-            parse_axis_spec(name, spec)
-        catch
-            nothing
-        end
-        ax isa FixedAxis || continue
-        out[name] = ax.value
-    end
-    return out
-end
-
 function _validation_help_text()
     return join([
         "Допустимые форматы:",
         "  1) Число: 500",
+        "  1a) Время: 100 ms, 12 s, 250 us",
         "  2) Диапазон: 500:2:540 (start:step:stop)",
         "  3) Список: 500,510,520",
         "  4) Выражение: =round(wl/40)*20",
         "  5) Строка: \"SIG\"",
     ], "\n")
-end
-
-function _validate_specs(raw_params::Vector{Pair{Symbol,String}})
-    errs = Dict{Symbol,String}()
-    for (name, spec) in raw_params
-        spec_str = String(spec)
-        ax = nothing
-        try
-            ax = parse_axis_spec(name, spec_str)
-        catch ex
-            errs[name] = sprint(showerror, ex)
-            continue
-        end
-
-        if startswith(strip(spec_str), "=")
-            if !(ax isa FixedAxis || ax isa DependentAxis || ax isa MultiDependentAxis)
-                errs[name] = "invalid expression"
-            elseif ax isa FixedAxis && ax.value isa AbstractString
-                errs[name] = "invalid expression"
-            end
-        elseif occursin(":", spec_str) || occursin("..", spec_str) || occursin(",", spec_str)
-            if !(ax isa RangeAxis || ax isa ListAxis)
-                errs[name] = "invalid range/list format"
-            end
-        end
-    end
-    return errs
 end
 
 function _show_validation_dialog(win, errs::Dict{Symbol,String})
@@ -259,35 +195,51 @@ function _set_combo_active!(box, values::Vector{String}, wanted::String)
     return nothing
 end
 
+function _combo_active_index(box)
+    return Gtk.get_gtk_property(box, :active, Int) + 1
+end
+
+function _clear_combo_text!(box)
+    ccall((:gtk_combo_box_text_remove_all, Gtk.libgtk), Nothing, (Ptr{Gtk.GObject},), box.handle)
+    return nothing
+end
+
+function _set_combo_items!(box, labels::Vector{String})
+    _clear_combo_text!(box)
+    for label in labels
+        push!(box, label)
+    end
+    Gtk.set_gtk_property!(box, :active, isempty(labels) ? -1 : 0)
+    return nothing
+end
+
+function _with_blocked_signal(f::Function, widget, handler_id)
+    if handler_id == 0
+        return f()
+    end
+    Gtk.signal_handler_block(widget, handler_id)
+    try
+        return f()
+    finally
+        Gtk.signal_handler_unblock(widget, handler_id)
+    end
+end
+
+function _set_entry_values!(entries::Dict{Symbol,AxisEntry}, raw_params::Vector{Pair{Symbol,String}})
+    for entry in values(entries)
+        Gtk.set_gtk_property!(entry.widget, :text, "")
+    end
+    for (name, value) in raw_params
+        haskey(entries, name) || continue
+        Gtk.set_gtk_property!(entries[name].widget, :text, value)
+    end
+    return nothing
+end
+
 function _update_plot_controls!(ui::GtkApp)
     mode_txt = _active_text(ui.mode_box, "line")
     Gtk.set_gtk_property!(ui.zbox, :sensitive, mode_txt == "heatmap")
     return nothing
-end
-
-function _is_measurement_active(state::AppState)
-    state.measurement_state in (State.Preparing, State.Running, State.Paused, State.Stopping)
-end
-
-function _is_focus_mode(state::AppState)
-    sp = state.scan_params
-    sp === nothing && return false
-    return any(ax -> ax isa LoopAxis && ax.name == :loop && ax.stop === nothing, sp.axes)
-end
-
-function _to_int_default(v, default::Int=1)
-    try
-        return Int(round(Float64(v)))
-    catch
-        return default
-    end
-end
-
-function _focus_axes(scan_params::ScanAxisSet)
-    axes = scan_params.axes
-    have_loop = false
-    push!(axes, LoopAxis(name=:loop, start=1, step=1, stop=nothing))
-    return ScanAxisSet(axes)
 end
 
 function _safe_canvas_ctx(canvas)
@@ -301,25 +253,6 @@ function _safe_canvas_ctx(canvas)
     end
 end
 
-function _signal_points(state::AppState)
-    if !isempty(state.points)
-        return state.points
-    end
-    if state.current_spectrum !== nothing
-        n = min(length(state.current_spectrum.wavelength), length(state.current_spectrum.signal))
-        return [Dict{Symbol,Any}(:wl => state.current_spectrum.wavelength[i], :sig => state.current_spectrum.signal[i]) for i in 1:n]
-    end
-    return Dict{Symbol,Any}[]
-end
-
-function _raw_points(state::AppState)
-    pts = Dict{Symbol,Any}[]
-    for i in eachindex(state.current_raw)
-        push!(pts, Dict{Symbol,Any}(:idx => Float64(i), :value => state.current_raw[i]))
-    end
-    return pts
-end
-
 function _render_signal_canvas!(ui::GtkApp, state::AppState)
     canvas = ui.canvas_signal
     ctx = _safe_canvas_ctx(canvas)
@@ -327,7 +260,7 @@ function _render_signal_canvas!(ui::GtkApp, state::AppState)
     w = Float64(Gtk.width(canvas))
     h = Float64(Gtk.height(canvas))
     ps = _plot_settings(ui)
-    points = _signal_points(state)
+    points = signal_points(state)
     render_signal_plot!(
         ctx, w, h, points;
         xaxis=ps.xaxis, yaxis=ps.yaxis, zaxis=ps.zaxis, mode=ps.mode, log_scale=ps.log_scale,
@@ -342,7 +275,7 @@ function _render_raw_canvas!(canvas, state::AppState)
     w = Float64(Gtk.width(canvas))
     h = Float64(Gtk.height(canvas))
     render_signal_plot!(
-        ctx, w, h, _raw_points(state);
+        ctx, w, h, raw_points(state);
         xaxis=:idx, yaxis=:value, mode=:line, zaxis=:value, log_scale=false, title="raw camera data",
     )
     Gtk.draw(canvas)
@@ -350,18 +283,18 @@ function _render_raw_canvas!(canvas, state::AppState)
 end
 
 function _update_controls_state!(ui::GtkApp, state::AppState)
-    running = _is_measurement_active(state)
-    focus_running = running && _is_focus_mode(state)
-    connected = state.devices_connected
-    initialized = state.devices_initialized
-    have_signal = !isempty(_signal_points(state))
+    running = is_measurement_active(state)
+    focus_running = running && is_focus_mode(state)
+    connected = state.devices.connected
+    initialized = state.devices.initialized
+    have_signal = !isempty(signal_points(state))
 
     Gtk.set_gtk_property!(ui.connect_btn, :sensitive, !running && !connected)
     Gtk.set_gtk_property!(ui.init_btn, :sensitive, !running && connected && !initialized)
     Gtk.set_gtk_property!(ui.disconnect_btn, :sensitive, !running && connected)
     Gtk.set_gtk_property!(ui.pick_dir_btn, :sensitive, !running)
-    Gtk.set_gtk_property!(ui.scan_btn, :sensitive, !running && initialized && state.scan_params !== nothing)
-    Gtk.set_gtk_property!(ui.focus_btn, :sensitive, !running && initialized && state.scan_params !== nothing)
+    Gtk.set_gtk_property!(ui.scan_btn, :sensitive, !running && initialized && state.measurement.scan_params !== nothing)
+    Gtk.set_gtk_property!(ui.focus_btn, :sensitive, !running && initialized && state.measurement.scan_params !== nothing)
     Gtk.set_gtk_property!(ui.stop_btn, :sensitive, running)
     Gtk.set_gtk_property!(ui.power_btn, :sensitive, initialized)
     Gtk.set_gtk_property!(ui.save_dat_btn, :sensitive, have_signal)
@@ -379,14 +312,14 @@ function _update_controls_state!(ui::GtkApp, state::AppState)
 end
 
 function render!(ui::GtkApp, state::AppState)
-    points = length(state.points)
+    points = length(state.measurement.points)
     Gtk.set_gtk_property!(ui.status_label, :label, "measurement: $(state.measurement_state)")
-    Gtk.set_gtk_property!(ui.device_label, :label, state.device_status)
-    Gtk.set_gtk_property!(ui.power_label, :label, "power: $(round(state.current_power; digits=4))")
+    Gtk.set_gtk_property!(ui.device_label, :label, state.devices.status)
+    Gtk.set_gtk_property!(ui.power_label, :label, "power: $(round(state.devices.current_power; digits=4))")
     Gtk.set_gtk_property!(ui.points_label, :label, "points: $(points)")
-    file_lbl = state.last_saved_file === nothing ? "saved: -" : "saved: $(basename(state.last_saved_file))"
+    file_lbl = state.measurement.last_saved_file === nothing ? "saved: -" : "saved: $(basename(state.measurement.last_saved_file))"
     Gtk.set_gtk_property!(ui.file_label, :label, file_lbl)
-    Gtk.set_gtk_property!(ui.dir_label, :label, "dir: $(state.app_config.dir)")
+    Gtk.set_gtk_property!(ui.dir_label, :label, "dir: $(state.session.config.dir)")
 
     _update_plot_controls!(ui)
     _update_controls_state!(ui, state)
@@ -409,29 +342,40 @@ end
 
 function start_gtk_ui!(
     state::AppState,
-    event_ch,
     ui_channel,
-    meas_cmd::Channel{MeasurementCommand},
-    power_cmd::Channel{PowerCommand},
-    device_hub::DeviceHub;
-    config_path::AbstractString="preset.json",
+    controller::Controller;
     title::AbstractString="SHades2.0",
 )
-    raw_p = load_config(config_path)
-    state.raw_params = raw_p
-    state.scan_params = build_scan_axis_set_from_text_specs(raw_p)
+    presets = load_presets!(controller)
+    if isempty(presets)
+        presets = [build_preset(presets, Pair{Symbol,String}[]; name="Preset 1")]
+    end
+    presets_ref = Ref(presets)
+    selected_preset_idx = Ref(isempty(presets) ? 0 : 1)
+    template_ref = Ref(copy(presets_ref[][selected_preset_idx[]].params))
+    dispatch_raw_params!(controller, template_ref[])
 
     win = Gtk.Window(String(title), 980, 700)
     root = Gtk.Box(:v, 8)
 
     status_label = Gtk.Label("measurement: $(state.measurement_state)")
-    device_label = Gtk.Label(state.device_status)
-    power_label = Gtk.Label("power: $(state.current_power)")
+    device_label = Gtk.Label(state.devices.status)
+    power_label = Gtk.Label("power: $(state.devices.current_power)")
     points_label = Gtk.Label("points: 0")
     file_label = Gtk.Label("saved: -")
-    dir_label = Gtk.Label("dir: $(state.app_config.dir)")
+    dir_label = Gtk.Label("dir: $(state.session.config.dir)")
 
-    form, entries = _build_form_box(raw_p, event_ch)
+    form, entries = _build_form_box(template_ref[])
+
+    preset_box = Gtk.ComboBoxText()
+    preset_add_btn = Gtk.Button("+")
+    preset_del_btn = Gtk.Button("-")
+    preset_controls = Gtk.Box(:h, 6)
+    push!(preset_controls, Gtk.Label("Preset"))
+    push!(preset_controls, preset_box)
+    push!(preset_controls, preset_add_btn)
+    push!(preset_controls, preset_del_btn)
+    _set_combo_items!(preset_box, [p.name for p in presets_ref[]])
 
     connect_btn = Gtk.Button("Connect")
     init_btn = Gtk.Button("Init")
@@ -512,7 +456,10 @@ function start_gtk_ui!(
 
     params_expander = Gtk.Expander("Parameters")
     Gtk.set_gtk_property!(params_expander, :expanded, true)
-    push!(params_expander, params_scroller)
+    params_panel = Gtk.Box(:v, 8)
+    push!(params_panel, preset_controls)
+    push!(params_panel, params_scroller)
+    push!(params_expander, params_panel)
 
     device_expander = Gtk.Expander("Devices")
     Gtk.set_gtk_property!(device_expander, :expanded, true)
@@ -570,59 +517,101 @@ function start_gtk_ui!(
     )
     _gtk_install_error_css!(win)
 
-    function _maybe_update_focus_params!()
-        if !(_is_measurement_active(state) && _is_focus_mode(state))
+    function _update_preset_controls!()
+        Gtk.set_gtk_property!(preset_del_btn, :sensitive, !isempty(presets_ref[]))
+        return nothing
+    end
+
+    function _apply_preset!(idx::Int)
+        if idx < 1 || idx > length(presets_ref[])
             return nothing
         end
-        raw_now = _collect_raw_params(ui.entries, state.raw_params)
-        state.raw_params = raw_now
-        errs = _validate_specs(raw_now)
+        selected_preset_idx[] = idx
+        template_ref[] = copy(presets_ref[][idx].params)
+        _set_entry_values!(ui.entries, template_ref[])
+        raw_now, _ = _sync_form_params!()
+        _gtk_clear_errors!(ui.entries)
+        render!(ui, state)
+        return raw_now
+    end
+
+    function _sync_form_params!()
+        raw_now = _collect_raw_params(ui.entries, template_ref[])
+        dispatch_raw_params!(controller, raw_now)
+        errs = validation_errors(raw_now)
         _gtk_apply_errors!(ui.entries, errs)
-        live = _collect_fixed_params(raw_now)
-        isempty(live) && return nothing
-        put!(meas_cmd, UpdateMeasurementParams(live))
+        return raw_now, errs
+    end
+
+    function _maybe_update_focus_params!(raw_now, errs)
+        isempty(errs) || return nothing
+        if !(is_measurement_active(state) && is_focus_mode(state))
+            return nothing
+        end
+        publish_focus_params!(controller, raw_now)
         return nothing
     end
 
     for entry in values(ui.entries)
         Gtk.signal_connect((_) -> begin
-            raw_now = _collect_raw_params(ui.entries, state.raw_params)
-            state.raw_params = raw_now
-            errs = _validate_specs(raw_now)
-            _gtk_apply_errors!(ui.entries, errs)
-            _maybe_update_focus_params!()
+            raw_now, errs = _sync_form_params!()
+            _maybe_update_focus_params!(raw_now, errs)
             return nothing
         end, entry.widget, "activate")
         Gtk.signal_connect((_) -> begin
-            raw_now = _collect_raw_params(ui.entries, state.raw_params)
-            state.raw_params = raw_now
-            errs = _validate_specs(raw_now)
-            _gtk_apply_errors!(ui.entries, errs)
-            _maybe_update_focus_params!()
+            raw_now, errs = _sync_form_params!()
+            _maybe_update_focus_params!(raw_now, errs)
             return nothing
         end, entry.widget, "editing-done")
     end
 
-    function _emit_lifecycle_from_status(status_map::Dict{Symbol,NamedTuple{(:connected,:initialized,:healthy),Tuple{Bool,Bool,Bool}}})
-        connected = !isempty(status_map) && all(v -> v.connected, values(status_map))
-        initialized = !isempty(status_map) && all(v -> v.connected && v.initialized && v.healthy, values(status_map))
-        if initialized
-            msg = "devices: initialized"
-        elseif connected
-            msg = "devices: connected (not initialized)"
-        else
-            msg = "devices: disconnected"
-        end
-        put!(event_ch, SetDeviceLifecycle(connected, initialized, msg))
+    function _refresh_lifecycle!()
+        refresh_lifecycle!(controller)
         return nothing
     end
 
-    function _refresh_lifecycle!()
-        try
-            _emit_lifecycle_from_status(devices_status(device_hub))
-        catch ex
-            put!(event_ch, SetDeviceLifecycle(false, false, "devices: lifecycle error"))
-            @warn "Failed to read device lifecycle status" exception=(ex, catch_backtrace())
+    preset_changed_handler = Ref{Culong}(0)
+
+    function _refresh_preset_box!(idx::Int)
+        labels = [p.name for p in presets_ref[]]
+        active_idx = isempty(labels) ? 0 : clamp(idx, 1, length(labels))
+        _with_blocked_signal(preset_box, preset_changed_handler[]) do
+            _set_combo_items!(preset_box, labels)
+            Gtk.set_gtk_property!(preset_box, :active, active_idx == 0 ? -1 : active_idx - 1)
+        end
+        selected_preset_idx[] = active_idx
+        return active_idx
+    end
+
+    preset_changed_handler[] = Gtk.signal_connect(preset_box, "changed") do _
+        idx = _combo_active_index(preset_box)
+        _apply_preset!(idx)
+        return nothing
+    end
+
+    Gtk.signal_connect(preset_add_btn, "clicked") do _
+        raw_now = _collect_raw_params(ui.entries, template_ref[])
+        preset = build_preset(presets_ref[], raw_now)
+        presets_ref[] = append_preset!(controller, presets_ref[], preset)
+        _update_preset_controls!()
+        new_idx = _refresh_preset_box!(length(presets_ref[]))
+        _apply_preset!(new_idx)
+        return nothing
+    end
+
+    Gtk.signal_connect(preset_del_btn, "clicked") do _
+        idx = _combo_active_index(preset_box)
+        if idx < 1 || idx > length(presets_ref[])
+            return nothing
+        end
+        presets_ref[] = delete_preset_at!(controller, presets_ref[], idx)
+        _update_preset_controls!()
+        if isempty(presets_ref[])
+            _refresh_preset_box!(0)
+        else
+            new_idx = min(idx, length(presets_ref[]))
+            _refresh_preset_box!(new_idx)
+            _apply_preset!(new_idx)
         end
         return nothing
     end
@@ -640,65 +629,39 @@ function start_gtk_ui!(
     end
 
     Gtk.signal_connect(power_btn, "toggled") do w
-        if !state.devices_initialized
-            Gtk.GAccessor.active(w) && Gtk.set_gtk_property!(w, :active, false)
-            return nothing
-        end
-        if Gtk.GAccessor.active(w)
-            put!(power_cmd, StartStab())
-        else
-            put!(power_cmd, StopStab())
-        end
+        result = toggle_power_stabilization!(controller, state, Gtk.GAccessor.active(w))
+        result.ok || (Gtk.GAccessor.active(w) && Gtk.set_gtk_property!(w, :active, false))
+        return nothing
     end
 
     Gtk.signal_connect(pick_dir_btn, "clicked") do _
         path = Gtk.open_dialog("Select output folder", win, action=Gtk.GtkFileChooserAction.SELECT_FOLDER)
         path === nothing && return nothing
         chosen = isdir(path) ? path : dirname(path)
-        put!(event_ch, DirChosen(chosen))
-        render!(ui, state)
+        select_output_dir!(controller, chosen)
         return nothing
     end
 
     Gtk.signal_connect(connect_btn, "clicked") do _
-        try
-            connect_devices!(device_hub)
-            _refresh_lifecycle!()
-        catch ex
-            @warn "Connect failed" exception=(ex, catch_backtrace())
-        end
+        connect_devices!(controller)
         return nothing
     end
 
     Gtk.signal_connect(init_btn, "clicked") do _
-        try
-            init_devices!(device_hub)
-            _refresh_lifecycle!()
-        catch ex
-            @warn "Init failed" exception=(ex, catch_backtrace())
-        end
+        init_devices!(controller)
         return nothing
     end
 
     Gtk.signal_connect(disconnect_btn, "clicked") do _
-        try
-            disconnect_devices!(device_hub)
-            Gtk.GAccessor.active(power_btn) && Gtk.set_gtk_property!(power_btn, :active, false)
-            _refresh_lifecycle!()
-        catch ex
-            @warn "Disconnect failed" exception=(ex, catch_backtrace())
-        end
+        Gtk.GAccessor.active(power_btn) && Gtk.set_gtk_property!(power_btn, :active, false)
+        disconnect_devices!(controller)
         return nothing
     end
 
     Gtk.signal_connect(scan_btn, "clicked") do _
-        if !state.devices_initialized
-            put!(event_ch, SetDeviceLifecycle(state.devices_connected, state.devices_initialized, "devices: init required before scan"))
-            return nothing
-        end
-        raw_now = _collect_raw_params(ui.entries, state.raw_params)
-        state.raw_params = raw_now
-        errs = _validate_specs(raw_now)
+        raw_now = _collect_raw_params(ui.entries, template_ref[])
+        result = start_scan!(controller, state, raw_now)
+        errs = result.errors
         if !isempty(errs)
             _gtk_apply_errors!(ui.entries, errs)
             _show_validation_dialog(win, errs)
@@ -706,24 +669,13 @@ function start_gtk_ui!(
         else
             _gtk_clear_errors!(ui.entries)
         end
-        try
-            state.scan_params = build_scan_axis_set_from_text_specs(raw_now)
-        catch
-            return nothing
-        end
-        out_dir = strip(state.app_config.dir)
-        put!(meas_cmd, StartMeasurement(state.scan_params, isempty(out_dir) ? nothing : out_dir))
         return nothing
     end
 
     Gtk.signal_connect(focus_btn, "clicked") do _
-        if !state.devices_initialized
-            put!(event_ch, SetDeviceLifecycle(state.devices_connected, state.devices_initialized, "devices: init required before focus"))
-            return nothing
-        end
-        raw_now = _collect_raw_params(ui.entries, state.raw_params)
-        state.raw_params = raw_now
-        errs = _validate_specs(raw_now)
+        raw_now = _collect_raw_params(ui.entries, template_ref[])
+        result = start_focus!(controller, state, raw_now)
+        errs = result.errors
         if !isempty(errs)
             _gtk_apply_errors!(ui.entries, errs)
             _show_validation_dialog(win, errs)
@@ -731,25 +683,16 @@ function start_gtk_ui!(
         else
             _gtk_clear_errors!(ui.entries)
         end
-        try
-            state.scan_params = build_scan_axis_set_from_text_specs(raw_now)
-        catch
-            return nothing
-        end
-        state.scan_params === nothing && return nothing
-        put!(meas_cmd, StartMeasurement(_focus_axes(state.scan_params), nothing))
         return nothing
     end
 
     Gtk.signal_connect(stop_btn, "clicked") do _
-        put!(meas_cmd, StopMeasurement())
+        stop_measurement!(controller)
         return nothing
     end
 
     Gtk.signal_connect(save_dat_btn, "activate") do _
-        pts = _signal_points(state)
-        println(pts)
-        println(typeof(pts))
+        pts = signal_points(state)
         isempty(pts) && return nothing
         path = Gtk.save_dialog("Save spectrum .dat", win)
         path === nothing && return nothing
@@ -768,7 +711,7 @@ function start_gtk_ui!(
     end
 
     Gtk.signal_connect(save_png_btn, "activate") do _
-        pts = _signal_points(state)
+        pts = signal_points(state)
         isempty(pts) && return nothing
         path = Gtk.save_dialog("Save spectrum .png", win)
         path === nothing && return nothing
@@ -789,14 +732,13 @@ function start_gtk_ui!(
 
     Gtk.signal_connect(win, "destroy") do _
         refresh_alive[] = false
-        state.raw_params = _collect_raw_params(ui.entries, state.raw_params)
-        save_config(config_path, state.raw_params)
         Gtk.gtk_main_running[] && Gtk.gtk_quit()
         return nothing
     end
 
     Gtk.showall(win)
     _update_plot_controls!(ui)
+    _update_preset_controls!()
     _refresh_lifecycle!()
 
     @async begin

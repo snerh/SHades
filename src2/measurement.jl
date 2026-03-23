@@ -1,14 +1,14 @@
 module Measurement
 
 using Statistics
-using JSON
 using ..Domain
 using ..Parameters
 using ..DeviceManager
+using ..DatasetIO
+using ..TimeUtils
 
 export MeasurementCommand, StartMeasurement, StopMeasurement, ShutdownMeasurement, UpdateMeasurementParams
 export measurement_loop, MeasurementStarted, MeasurementStep, MeasurementDone, MeasurementStopped
-export DirChosen
 
 abstract type MeasurementCommand end
 
@@ -22,10 +22,6 @@ struct StopMeasurement <: MeasurementCommand end
 struct ShutdownMeasurement <: MeasurementCommand end
 struct UpdateMeasurementParams <: MeasurementCommand
     params::Dict{Symbol,Any}
-end
-
-struct DirChosen <: SystemEvent
-    dir::Union{Nothing,String}
 end
 
 struct MeasurementStarted <: SystemEvent
@@ -92,74 +88,8 @@ end
 
 _fname_atom(v) = replace(string(v), r"[^0-9A-Za-z._-]+" => "_")
 
-function _save_raw_file(path::AbstractString, params::Dict{Symbol,Any}, data::Vector{Float64})
-    json = JSON.json(params)
-    open(path, "w") do io
-        println(io, "# ", json)
-        for y in data
-            println(io, y)
-        end
-    end
-    return path
-end
-
-function _load_raw_file(path::AbstractString)
-    data = Float64[]
-    open(path, "r") do io
-        s = readline(io)
-        header = s[2:end]
-        point = Dict(JSON.parse(header,dicttype=Dict{Symbol,Any}))
-        for line in eachline(io)
-            s = strip(line)
-            isempty(s) && continue
-            startswith(s, "#") && continue
-            try
-                push!(data, parse(Float64, s))
-            catch
-            end
-        end
-        return (point, data)
-    end
-end
-
-function import_dir(path::AbstractString)
-	files = readdir(path,join = true,sort = true)
-    dat_files = filter(x -> x[end-3:end]==".dat",files)
-    if length(dat_files) == 0
-        return Point[]
-    end
-    function aux(file)
-        point, data = _load_raw_file(file)
-        new_p = new_point(point, data)
-        new_p[:__file_path] = file
-        new_p
-    end
-    full_list = map(aux, dat_files)
-    return full_list
-end
-
 function _as_seconds(v)
-    if v isa Number
-        return Float64(v)
-    elseif v isa String
-        s = strip(String(v))
-        m = match(r"^([-+]?(?:\d+(?:\.\d*)?|\.\d+))\s*(us|ms|s)?$", s)
-        m === nothing && return 0.1
-        val = parse(Float64, m.captures[1])
-        unit = m.captures[2]
-        unit === nothing && return val
-        unit == "s" && return val
-        unit == "ms" && return val / 1000.0
-        unit == "us" && return val / 1_000_000.0
-        return val
-    elseif v isa Vector{Any}
-        val = v[1]
-        unit = v[2]
-        unit == "s" && return val
-        unit == "ms" && return val / 1000.0
-        unit == "us" && return val / 1_000_000.0
-    end
-
+    return TimeUtils.parse_duration_seconds(v)
 end
 
 _frames(p::Dict{Symbol,Any}) = Int(round(Float64(get(p, :frames, 1))))
@@ -195,7 +125,7 @@ function _apply_new_params!(oldp::Dict{Symbol,Any}, newp::Dict{Symbol,Any}, mana
             _set_param!(manager, :ell, :analyzer, Float64(v))
         elseif k == :polarizer
             _set_param!(manager, :ell, :polarizer, Float64(v))
-        elseif k == :temp || k == :camera_temp
+        elseif k == :temp || k == :camera_temp || k == :cam_temp
             _set_param!(manager, :cam, :temp, Float64(v))
         end
     end
@@ -322,10 +252,9 @@ function _point_wl(p::Dict{Symbol,Any}, fallback::Int)
 end
 
 function new_point(p, data)
-    new_p = copy(p)
     sig = isempty(data) ? NaN : maximum(data) - median(data)
     t_s = _as_seconds(get(p, :acq_time, get(p, :time_s, 0.1)))
-    
+
     new_p = copy(p)
     new_p[:time_s] = t_s
     new_p[:sig] = sig
@@ -350,7 +279,7 @@ function _measurement_step!(
     data = Float64[]
 
     if file_path !== nothing && isfile(file_path)
-        (p, data) = _load_raw_file(file_path)
+        (p, data) = DatasetIO.load_raw_file(file_path)
         reused = true
     else
         delay_s = Float64(get(p, :delay_s, 1.5))
@@ -368,10 +297,10 @@ function _measurement_step!(
     point_payload[:real_power] = real_power   
     file_path !== nothing && (point_payload[:__file_path] = file_path)
     sig = point_payload[:sig]
-    wl = point_payload[:wl] 
+    wl = point_payload[:wl]
 
     if !reused && file_path !== nothing
-        _save_raw_file(file_path, point_payload, data)
+        DatasetIO.save_raw_file(file_path, point_payload, data)
     end
 
     push!(ctx.wls, wl)

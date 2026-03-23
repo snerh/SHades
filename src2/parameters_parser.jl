@@ -2,7 +2,7 @@ module ParameterParser
 
 using ..Parameters
 
-export parse_axis_spec, build_scan_axis_set_from_text_specs, build_scan_plan_from_text_specs
+export parse_axis_spec, build_scan_axis_set_from_text_specs
 
 const _SAFE_CONSTS = Dict{Symbol,Float64}(
     :pi => π,

@@ -1,1 +1,2 @@
-{"wl":"580","sol_wl":"=round(wl/40)*20","inter":"IDL","power":"10","polarizer":"0:10:100","analyzer":"0","acq_time":"100","cam_temp":"-10","frames":"2"}
+{"params":[{"wl":"700:5:800"},{"sol_wl":"=20*round(wl/40)"},{"inter":"IDL"},{"power":"100"},{"polarizer":"0"},{"analyzer":"0"},{"acq_time":"500 ms"},{"cam_temp":"-10"},{"frames":"2"}],"name":"Preset 2"}
+{"params":[{"wl":"600"},{"sol_wl":"=20*round(wl/40)"},{"inter":"IDL"},{"power":"100"},{"polarizer":"0:10:180"},{"analyzer":"=polarizer+90"},{"acq_time":"100 ms"},{"cam_temp":"-10"},{"frames":"2"}],"name":"Preset 3"}
