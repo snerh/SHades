@@ -35,6 +35,10 @@ mutable struct CameraState
 end
 
 
+mutable struct LockinState
+    target_power::Float64
+end
+
 mutable struct LaserState
     wl::Float64
     interaction::String
@@ -150,12 +154,17 @@ function _make_device(
 end
 
 function LockinDevice(; port::AbstractString="COM6", timeout_s::Float64=2.0)
+    state = LockinState(0.0001)
     connect_device = () -> Lockin.open(port)
     init_device = dev -> (Lockin.init(dev); :ok)
-    set_param = (dev, name, value) -> :ok
+    set_param = (dev, name, value) -> begin
+        if name == :target_power
+            state.target_power = value
+        end
+    end
     read_signal = (dev, name) -> begin
         if name == :target_power
-            return nothing
+            return state.target_power
         elseif name == :power
             val = Lockin.get(dev)
             return val === nothing ? NaN : Float64(val)
@@ -185,10 +194,10 @@ function LaserDevice(
     set_param = (dev, name, value) -> begin
         if name == :wl
             state.wl = Float64(value)
+            Orpheus.setWL(dev, state.wl, state.interaction)
         elseif name == :interaction
             state.interaction = String(value)
         end
-        Orpheus.setWL(dev, state.wl, state.interaction)
         return :ok
     end
     read_signal = (dev, name) -> begin

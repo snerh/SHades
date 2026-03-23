@@ -27,20 +27,28 @@ function _ensure_required_params(raw_params::Vector{Pair{Symbol,String}})
 end
 
 function save_config(path, params::Vector{Pair{Symbol, String}})
-    json = JSON.json(params)
+    json_ready = [Dict(p.first => p.second) for p in params]
+    json = JSON.json(json_ready)
     open(path, "w") do io
         write(io, json)
     end
     return nothing
 end
 
+function _dict_to_pair(x::Dict{Symbol,Any})
+    length(x) == 1 || error("Expected dict with exactly one key, got $(length(x))")
+    k = first(keys(x))
+    return k => string(x[k])
+end
+
 function load_config(path)
     try
         s = read(path, String)
-        raw_params = JSON.parse(s,Vector{Pair{Symbol,String}})
+        parsed = JSON.parse(s, dicttype=Dict{Symbol,Any})
+        raw_params = _dict_to_pair.(parsed)
         _ensure_required_params(raw_params)
-    catch
-        @warn "No backup file"
+    catch ex
+        @warn "No backup file" exception=(ex, catch_backtrace())
         copy(_REQUIRED_DEFAULTS)
     end
 end

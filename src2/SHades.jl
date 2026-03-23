@@ -29,7 +29,7 @@ using .RawDevices
 
 export AppRuntime, run, run_real, stop!
 export start_measurement!, stop_measurement!
-export start_power_stabilization!, stop_power_stabilization!, set_target_power!
+#export start_power_stabilization!, stop_power_stabilization!, set_target_power!
 export start_gtk_ui!
 export save_plot_dat, save_plot_png
 export save_spectrum_dat, save_spectrum_png
@@ -182,9 +182,9 @@ start_measurement!(runtime::AppRuntime, params::ScanAxisSet; output_dir::Union{N
     put!(runtime.meas_cmd, StartMeasurement(params, output_dir))
 stop_measurement!(runtime::AppRuntime) = put!(runtime.meas_cmd, StopMeasurement())
 
-start_power_stabilization!(runtime::AppRuntime) = put!(runtime.power_cmd, StartStab())
-stop_power_stabilization!(runtime::AppRuntime) = put!(runtime.power_cmd, StopStab())
-set_target_power!(runtime::AppRuntime, value::Real) = put!(runtime.power_cmd, SetTargetPower(Float64(value)))
+#start_power_stabilization!(runtime::AppRuntime) = put!(runtime.power_cmd, StartStab())
+#stop_power_stabilization!(runtime::AppRuntime) = put!(runtime.power_cmd, StopStab())
+#set_target_power!(runtime::AppRuntime, value::Real) = put!(runtime.power_cmd, SetTargetPower(Float64(value)))
 
 start_gtk_ui!(runtime::AppRuntime; config_path::AbstractString="preset.json", title::AbstractString="SHades2.0") =
     GtkUI.start_gtk_ui!(

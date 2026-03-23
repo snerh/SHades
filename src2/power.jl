@@ -49,8 +49,11 @@ function _power_step!(event_ch, manager, target)
     frac = clamp(target_eff / safe_power * frac0, 0.0, 1.0)
     new_ang = asin(sqrt(frac)) / 2
 
-    put!(manager.devices[:ell], SetParameter(:ang_power, new_ang, reply))
-    take!(reply)
+    # rotate only on 1 degree or more
+    if abs(new_ang - ang)> pi/180.
+        put!(manager.devices[:ell], SetParameter(:ang_power, new_ang, reply))
+        take!(reply)
+    end
     return nothing
 end
 

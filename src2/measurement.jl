@@ -107,8 +107,8 @@ function _load_raw_file(path::AbstractString)
     data = Float64[]
     open(path, "r") do io
         s = readline(io)
-        point = Dict(JSON.parse(s[2:end],Dict{Symbol,Any}))
-        println(point)
+        header = s[2:end]
+        point = Dict(JSON.parse(header,dicttype=Dict{Symbol,Any}))
         for line in eachline(io)
             s = strip(line)
             isempty(s) && continue
@@ -126,11 +126,12 @@ function import_dir(path::AbstractString)
 	files = readdir(path,join = true,sort = true)
     dat_files = filter(x -> x[end-3:end]==".dat",files)
     if length(dat_files) == 0
-        return nothing
+        return Point[]
     end
     function aux(file)
         point, data = _load_raw_file(file)
         new_p = new_point(point, data)
+        new_p[:__file_path] = file
         new_p
     end
     full_list = map(aux, dat_files)
@@ -213,7 +214,7 @@ end
 
 function _capture_background!(manager, p::Dict{Symbol,Any})
     _set_param!(manager, :spec, :shutter, false)
-    sleep(2.0)
+    sleep(0.1)
     back = _acquire_with_back(manager, p, nothing)
     _set_param!(manager, :spec, :shutter, true)
     return back
@@ -306,7 +307,7 @@ function _measurement_start!(manager, scan_axes::ScanAxisSet)
 
     oldp = _apply_new_params!(Dict{Symbol,Any}(), first_point, manager)
     back = _capture_background!(manager, first_point)
-    sleep(2.0)
+    sleep(0.1)
 
     return MeasurementContext(oldp, back, Float64[], Float64[])
 end
@@ -348,7 +349,7 @@ function _measurement_step!(
     reused = false
     data = Float64[]
 
-    if file_path !== nothing && isfile(file_path) && False
+    if file_path !== nothing && isfile(file_path)
         (p, data) = _load_raw_file(file_path)
         reused = true
     else
@@ -365,6 +366,7 @@ function _measurement_step!(
 
     point_payload = new_point(p, data)
     point_payload[:real_power] = real_power   
+    file_path !== nothing && (point_payload[:__file_path] = file_path)
     sig = point_payload[:sig]
     wl = point_payload[:wl] 
 

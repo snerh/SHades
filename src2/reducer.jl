@@ -14,12 +14,17 @@ function reduce!(state::AppState, ev)
     if ev isa MeasurementStarted
         state.measurement_state = State.Preparing
         state.current_spectrum = nothing
-        empty!(state.points)
         empty!(state.current_raw)
         state.last_saved_file = nothing
 
     elseif ev isa MeasurementStep
-        push!(state.points, copy(ev.point))
+        point_copy = copy(ev.point)
+        existing_idx = ev.file_path === nothing ? nothing : findfirst(p -> get(p, :__file_path, nothing) == ev.file_path, state.points)
+        if existing_idx === nothing
+            push!(state.points, point_copy)
+        else
+            state.points[existing_idx] = point_copy
+        end
         state.current_spectrum = ev.spectrum
         state.current_raw = copy(ev.raw)
         state.last_saved_file = ev.file_path
@@ -33,8 +38,10 @@ function reduce!(state::AppState, ev)
     
     elseif ev isa DirChosen
         state.app_config.dir = ev.dir
-        state.points = Vector{Dict{Symbol,Any}}(Measurement.import_dir(ev.dir))
-        println(typeof(state.points))
+        state.points = Measurement.import_dir(ev.dir)
+        state.current_spectrum = nothing
+        empty!(state.current_raw)
+        state.last_saved_file = nothing
 
     elseif ev isa LaserPowerUpdate
         state.current_power = ev.power
