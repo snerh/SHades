@@ -1,5 +1,6 @@
 module Power
 
+include("Log.jl")
 using HTTP
 using JSON
 
@@ -18,9 +19,15 @@ function _extract_power(payload)
 end
 
 function get(; ip::AbstractString=DEFAULT_IP, timeout_s::Real=2)
-    resp = HTTP.get("http://$(ip)/power"; readtimeout=timeout_s)
-    payload = JSON.parse(String(resp.body))
-    return _extract_power(payload)
+    url = "http://$(ip)/power"
+    Log.printlog("Power_web GET ", url, " timeout_s=", timeout_s)
+    resp = HTTP.get(url; readtimeout=timeout_s)
+    body = String(resp.body)
+    Log.printlog("Power_web response status=", resp.status, " body=", body)
+    payload = JSON.parse(body)
+    power = _extract_power(payload)
+    Log.printlog("Power_web parsed power=", power)
+    return power
 end
 
 end

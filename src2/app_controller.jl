@@ -1,5 +1,7 @@
 module AppController
 
+include("devices/raw/Log.jl")
+
 using ..State
 using ..DeviceManager
 using ..AppEvents
@@ -74,6 +76,7 @@ function publish_focus_params!(controller::Controller, raw_params::Vector{Pair{S
 end
 
 function _emit_lifecycle!(controller::Controller, connected::Bool, initialized::Bool, message::AbstractString)
+    Log.printlog("lifecycle: connected=", connected, " initialized=", initialized, " message=", message)
     put!(controller.event_ch, SetDeviceLifecycle(connected, initialized, String(message)))
     return nothing
 end
@@ -86,15 +89,21 @@ end
 function refresh_lifecycle!(controller::Controller)
     try
         status_map = devices_status(controller.device_hub)
-        connected = !isempty(status_map) && all(v -> v.connected, values(status_map))
-        initialized = !isempty(status_map) && all(v -> v.connected && v.initialized && v.healthy, values(status_map))
+        total = length(status_map)
+        connected_count = count(v -> v.connected, values(status_map))
+        connected = connected_count > 0
+        all_connected = total > 0 && connected_count == total
+        initialized = total > 0 && all(v -> v.connected && v.initialized && v.healthy, values(status_map))
         msg =
             initialized ? "devices: initialized" :
-            connected ? "devices: connected (not initialized)" :
+            all_connected ? "devices: connected (not initialized)" :
+            connected ? "devices: partially connected ($(connected_count)/$(total))" :
             "devices: disconnected"
+        Log.printlog("refresh_lifecycle!: total=", total, " connected_count=", connected_count, " all_connected=", all_connected, " initialized=", initialized)
         _emit_lifecycle!(controller, connected, initialized, msg)
         return (ok=true, connected=connected, initialized=initialized)
     catch ex
+        Log.printlog("refresh_lifecycle!: error ", sprint(showerror, ex))
         _emit_lifecycle!(controller, false, false, "devices: lifecycle error")
         @warn "Failed to read device lifecycle status" exception=(ex, catch_backtrace())
         return (ok=false, error=ex)
@@ -103,9 +112,12 @@ end
 
 function connect_devices!(controller::Controller)
     try
-        DeviceManager.connect_devices!(controller.device_hub)
+        Log.printlog("connect_devices!: user request")
+        results = DeviceManager.connect_devices!(controller.device_hub)
+        Log.printlog("connect_devices!: results=", repr(results))
         return refresh_lifecycle!(controller)
     catch ex
+        Log.printlog("connect_devices!: error ", sprint(showerror, ex))
         @warn "Connect failed" exception=(ex, catch_backtrace())
         return (ok=false, error=ex)
     end
@@ -113,9 +125,12 @@ end
 
 function init_devices!(controller::Controller)
     try
-        DeviceManager.init_devices!(controller.device_hub)
+        Log.printlog("init_devices!: user request")
+        results = DeviceManager.init_devices!(controller.device_hub)
+        Log.printlog("init_devices!: results=", repr(results))
         return refresh_lifecycle!(controller)
     catch ex
+        Log.printlog("init_devices!: error ", sprint(showerror, ex))
         @warn "Init failed" exception=(ex, catch_backtrace())
         return (ok=false, error=ex)
     end
@@ -123,10 +138,13 @@ end
 
 function disconnect_devices!(controller::Controller)
     try
+        Log.printlog("disconnect_devices!: user request")
         put!(controller.power_cmd, controller.mk_stop_power())
-        DeviceManager.disconnect_devices!(controller.device_hub)
+        results = DeviceManager.disconnect_devices!(controller.device_hub)
+        Log.printlog("disconnect_devices!: results=", repr(results))
         return refresh_lifecycle!(controller)
     catch ex
+        Log.printlog("disconnect_devices!: error ", sprint(showerror, ex))
         @warn "Disconnect failed" exception=(ex, catch_backtrace())
         return (ok=false, error=ex)
     end

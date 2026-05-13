@@ -1,5 +1,7 @@
 module DeviceManager
 
+include("devices/raw/Log.jl")
+
 export DeviceHub, RawDevice, MockDevice, MockCamDevice
 export DeviceCommand, SetParameter, ReadSignal, ShutdownDevice
 export ConnectDevice, InitDevice, DisconnectDevice, GetDeviceStatus
@@ -60,7 +62,9 @@ end
 function connect_devices!(hub::DeviceHub)
     out = Dict{Symbol,Any}()
     for name in _sorted_device_names(hub)
+        Log.printlog("connect_devices!: requesting connect for ", name)
         out[name] = _request!(hub.devices[name], reply -> ConnectDevice(reply))
+        Log.printlog("connect_devices!: result for ", name, " => ", out[name])
     end
     return out
 end
@@ -68,7 +72,9 @@ end
 function init_devices!(hub::DeviceHub)
     out = Dict{Symbol,Any}()
     for name in _sorted_device_names(hub)
+        Log.printlog("init_devices!: requesting init for ", name)
         out[name] = _request!(hub.devices[name], reply -> InitDevice(reply))
+        Log.printlog("init_devices!: result for ", name, " => ", out[name])
     end
     return out
 end
@@ -76,7 +82,9 @@ end
 function disconnect_devices!(hub::DeviceHub)
     out = Dict{Symbol,Any}()
     for name in _sorted_device_names(hub)
+        Log.printlog("disconnect_devices!: requesting disconnect for ", name)
         out[name] = _request!(hub.devices[name], reply -> DisconnectDevice(reply))
+        Log.printlog("disconnect_devices!: result for ", name, " => ", out[name])
     end
     return out
 end
@@ -86,6 +94,7 @@ function devices_status(hub::DeviceHub)
     for name in _sorted_device_names(hub)
         st = _request!(hub.devices[name], reply -> GetDeviceStatus(reply))
         out[name] = st
+        Log.printlog("devices_status: ", name, " => connected=", st.connected, " initialized=", st.initialized, " healthy=", st.healthy)
     end
     return out
 end
@@ -108,8 +117,10 @@ function device_loop(raw_dev, name::Symbol=:device)
     function _safe_disconnect!()
         if connected && dev !== nothing
             try
+                Log.printlog("device_loop[", name, "]: closing device")
                 raw_dev.close_device(dev)
             catch ex
+                Log.printlog("device_loop[", name, "]: disconnect failed ", sprint(showerror, ex))
                 put!(event_ch, DeviceError("Disconnect failed on $(name): $(sprint(showerror, ex))"))
             end
         end
@@ -120,14 +131,17 @@ function device_loop(raw_dev, name::Symbol=:device)
     end
 
     function _recover!()
+        Log.printlog("device_loop[", name, "]: starting recovery")
         _safe_disconnect!()
         new_dev = call_with_timeout(() -> raw_dev.connect_device(), t)
         if new_dev === :timeout
             healthy = false
+            Log.printlog("device_loop[", name, "]: recovery connect timeout")
             put!(event_ch, DeviceError("Recover connect timeout on $(name)"))
             return false
         elseif new_dev isa Exception
             healthy = false
+            Log.printlog("device_loop[", name, "]: recovery connect error ", sprint(showerror, new_dev))
             put!(event_ch, DeviceError("Recover connect error on $(name): $(sprint(showerror, new_dev))"))
             return false
         end
@@ -135,26 +149,31 @@ function device_loop(raw_dev, name::Symbol=:device)
         dev = new_dev
         connected = true
         initialized = false
+        Log.printlog("device_loop[", name, "]: recovery connect ok")
 
         init_res = call_with_timeout(() -> raw_dev.init_device(dev), t)
         if init_res === :timeout
             healthy = false
+            Log.printlog("device_loop[", name, "]: recovery init timeout")
             put!(event_ch, DeviceError("Recover init timeout on $(name)"))
             return false
         elseif init_res isa Exception
             healthy = false
+            Log.printlog("device_loop[", name, "]: recovery init error ", sprint(showerror, init_res))
             put!(event_ch, DeviceError("Recover init error on $(name): $(sprint(showerror, init_res))"))
             return false
         end
 
         initialized = true
         healthy = true
+        Log.printlog("device_loop[", name, "]: recovery complete")
         return true
     end
 
     try
         for cmd in cmd_ch
             if cmd isa ConnectDevice
+                Log.printlog("device_loop[", name, "]: ConnectDevice received connected=", connected)
                 if connected
                     put!(cmd.reply, :ok)
                     continue
@@ -162,10 +181,12 @@ function device_loop(raw_dev, name::Symbol=:device)
                 new_dev = call_with_timeout(() -> raw_dev.connect_device(), t)
                 if new_dev === :timeout
                     healthy = false
+                    Log.printlog("device_loop[", name, "]: connect timeout")
                     put!(event_ch, DeviceError("Connect timeout on $(name)"))
                     put!(cmd.reply, :timeout)
                 elseif new_dev isa Exception
                     healthy = false
+                    Log.printlog("device_loop[", name, "]: connect error ", sprint(showerror, new_dev))
                     put!(event_ch, DeviceError("Connect error on $(name): $(sprint(showerror, new_dev))"))
                     put!(cmd.reply, :error)
                 else
@@ -173,10 +194,12 @@ function device_loop(raw_dev, name::Symbol=:device)
                     connected = true
                     initialized = false
                     healthy = true
+                    Log.printlog("device_loop[", name, "]: connect ok")
                     put!(cmd.reply, :ok)
                 end
 
             elseif cmd isa InitDevice
+                Log.printlog("device_loop[", name, "]: InitDevice received connected=", connected, " initialized=", initialized)
                 if !connected || dev === nothing
                     put!(cmd.reply, :not_connected)
                     continue
@@ -188,22 +211,27 @@ function device_loop(raw_dev, name::Symbol=:device)
                 init_res = call_with_timeout(() -> raw_dev.init_device(dev), t)
                 if init_res === :timeout
                     healthy = false
+                    Log.printlog("device_loop[", name, "]: init timeout")
                     put!(event_ch, DeviceError("Init timeout on $(name)"))
                     put!(cmd.reply, :timeout)
                 elseif init_res isa Exception
                     healthy = false
+                    Log.printlog("device_loop[", name, "]: init error ", sprint(showerror, init_res))
                     put!(event_ch, DeviceError("Init error on $(name): $(sprint(showerror, init_res))"))
                     put!(cmd.reply, :error)
                 else
                     initialized = true
+                    Log.printlog("device_loop[", name, "]: init ok")
                     put!(cmd.reply, :ok)
                 end
 
             elseif cmd isa DisconnectDevice
+                Log.printlog("device_loop[", name, "]: DisconnectDevice received")
                 _safe_disconnect!()
                 put!(cmd.reply, :ok)
 
             elseif cmd isa GetDeviceStatus
+                Log.printlog("device_loop[", name, "]: GetDeviceStatus => connected=", connected, " initialized=", initialized, " healthy=", healthy)
                 put!(cmd.reply, (connected=connected, initialized=initialized, healthy=healthy))
 
             elseif cmd isa SetParameter
@@ -303,6 +331,7 @@ function device_loop(raw_dev, name::Symbol=:device)
                 end
 
             elseif cmd isa ShutdownDevice
+                Log.printlog("device_loop[", name, "]: ShutdownDevice received")
                 if connected && dev !== nothing
                     try
                         raw_dev.abort_device(dev)
@@ -316,8 +345,10 @@ function device_loop(raw_dev, name::Symbol=:device)
     finally
         if connected && dev !== nothing
             try
+                Log.printlog("device_loop[", name, "]: final close")
                 raw_dev.close_device(dev)
             catch ex
+                Log.printlog("device_loop[", name, "]: close failed ", sprint(showerror, ex))
                 put!(event_ch, DeviceError("Close failed on $(name): $(sprint(showerror, ex))"))
             end
         end
