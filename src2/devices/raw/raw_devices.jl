@@ -7,15 +7,24 @@ import JSON
 const RAW_DIR = @__DIR__
 const DEFAULT_ELL_PRESET = joinpath(RAW_DIR, "ELL_preset.json")
 const DEFAULT_SOL_CONF_DIR = RAW_DIR
+const DEFAULT_ELL_PORT = get(ENV, "SHADES_ELL_PORT", "COM4")
+const DEFAULT_SOL_PORT = get(ENV, "SHADES_SOL_PORT", "COM5")
+const DEFAULT_POWER_WEB_IP = get(ENV, "SHADES_POWER_WEB_IP", "192.168.1.52")
+const DEFAULT_PSI_IP = get(ENV, "SHADES_PSI_IP", "192.168.240.181")
+const DEFAULT_PSI_LIBPATH = get(ENV, "SHADES_PSI_LIBPATH", PSI.DEFAULT_LIBPATH)
+const DEFAULT_ORPHEUS_TEST = lowercase(strip(get(ENV, "SHADES_ORPHEUS_TEST", "false"))) in ("1", "true", "yes", "y")
+const DEFAULT_ORPHEUS_IP = get(ENV, "SHADES_ORPHEUS_IP", "")
+const DEFAULT_ORPHEUS_PORT = get(ENV, "SHADES_ORPHEUS_PORT", "")
+const DEFAULT_ORPHEUS_ID = get(ENV, "SHADES_ORPHEUS_ID", "")
 
-include(joinpath(RAW_DIR, "Lockin_ESP.jl"))
+include(joinpath(RAW_DIR, "Power_web.jl"))
 include(joinpath(RAW_DIR, "ELL.jl"))
 include(joinpath(RAW_DIR, "Orpheus.jl"))
 include(joinpath(RAW_DIR, "psi_base.jl"))
 include(joinpath(RAW_DIR, "Sol.jl"))
 
 export build_real_devices
-export LockinDevice, EllDevice, LaserDevice, SpectrometerDevice, CameraDevice
+export PowerWebDevice, EllDevice, LaserDevice, SpectrometerDevice, CameraDevice
 
 struct ELLPreset
     power_addr::Int
@@ -35,7 +44,7 @@ mutable struct CameraState
 end
 
 
-mutable struct LockinState
+mutable struct PowerMeterState
     target_power::Float64
 end
 
@@ -51,6 +60,25 @@ mutable struct SpecState
 end
 
 _default_ell_preset() = ELLPreset(1, 0, 2, 33.6, 129.8, 10.0, true)
+
+function _serial_connect_error(device::AbstractString, port::AbstractString, ex)
+    msg = "Failed to connect $(device) on port $(repr(port)): $(sprint(showerror, ex))"
+    if !Sys.iswindows() && startswith(uppercase(port), "COM")
+        msg *= ". This looks like a Windows COM port name on $(Sys.KERNEL). Use a real serial device path such as /dev/ttyUSB0 and/or set SHADES_$(uppercase(device))_PORT."
+    end
+    return ErrorException(msg)
+end
+
+function _file_load_error(label::AbstractString, path::AbstractString, ex)
+    return ErrorException("Failed to load $(label) from $(repr(path)): $(sprint(showerror, ex))")
+end
+
+function _validate_sol_conf_dir(conf_dir::AbstractString)
+    required = ("gr1.cal", "gr2.cal", "gr3.cal", "mir.cal")
+    missing = [joinpath(conf_dir, name) for name in required if !isfile(joinpath(conf_dir, name))]
+    isempty(missing) && return nothing
+    throw(ErrorException("Missing SOL calibration files: $(join(missing, ", "))"))
+end
 
 function _bool_from_any(x, default::Bool)
     x === nothing && return default
@@ -68,7 +96,11 @@ function load_ell_preset(path::AbstractString=DEFAULT_ELL_PRESET)
         return _default_ell_preset()
     end
 
-    data = JSON.parsefile(path)
+    data = try
+        JSON.parsefile(path)
+    catch ex
+        throw(_file_load_error("ELL preset", path, ex))
+    end
     ell = get(data, "ell", data)
 
     function _axis(key, def_addr, def_home)
@@ -153,26 +185,31 @@ function _make_device(
     )
 end
 
-function LockinDevice(; port::AbstractString="COM6", timeout_s::Float64=2.0)
-    state = LockinState(0.0001)
-    connect_device = () -> Lockin.open(port)
-    init_device = dev -> (Lockin.init(dev); :ok)
+function PowerWebDevice(; ip::AbstractString=DEFAULT_POWER_WEB_IP, timeout_s::Float64=2.0)
+    state = PowerMeterState(0.0001)
+
+    connect_device = () -> ip
+    init_device = dev -> :ok
     set_param = (dev, name, value) -> begin
         if name == :target_power
-            state.target_power = value
+            state.target_power = Float64(value)
         end
+        return :ok
     end
     read_signal = (dev, name) -> begin
         if name == :target_power
             return state.target_power
         elseif name == :power
-            val = Lockin.get(dev)
-            return val === nothing ? NaN : Float64(val)
+            try
+                return Power.get(; ip=dev, timeout_s=timeout_s)
+            catch ex
+                throw(ErrorException("Failed to read power from Power_web at $(repr(dev)): $(sprint(showerror, ex))"))
+            end
         end
         return nothing
     end
     abort_device = dev -> nothing
-    close_device = dev -> (Lockin.close(dev); nothing)
+    close_device = dev -> nothing
 
     return _make_device(connect_device, init_device, set_param, read_signal, abort_device, close_device; timeout_s=timeout_s)
 end
@@ -214,10 +251,17 @@ function LaserDevice(
     return _make_device(connect_device, init_device, set_param, read_signal, abort_device, close_device; timeout_s=timeout_s)
 end
 
-function SpectrometerDevice(; port::AbstractString="COM5", conf_dir::AbstractString=DEFAULT_SOL_CONF_DIR, timeout_s::Float64=2.0)
+function SpectrometerDevice(; port::AbstractString=DEFAULT_SOL_PORT, conf_dir::AbstractString=DEFAULT_SOL_CONF_DIR, timeout_s::Float64=2.0)
     state = SpecState(nothing, nothing, nothing)
 
-    connect_device = () -> Sol.open(port; conf_dir=conf_dir)
+    connect_device = () -> begin
+        _validate_sol_conf_dir(conf_dir)
+        try
+            Sol.open(port; conf_dir=conf_dir)
+        catch ex
+            throw(_serial_connect_error("sol", port, ex))
+        end
+    end
     init_device = dev -> :ok
     set_param = (dev, name, value) -> begin
         if name == :wl
@@ -251,7 +295,7 @@ function SpectrometerDevice(; port::AbstractString="COM5", conf_dir::AbstractStr
     return _make_device(connect_device, init_device, set_param, read_signal, abort_device, close_device; timeout_s=timeout_s)
 end
 
-function EllDevice(; port::AbstractString="COM4", preset_path::AbstractString=DEFAULT_ELL_PRESET, timeout_s::Float64=2.0)
+function EllDevice(; port::AbstractString=DEFAULT_ELL_PORT, preset_path::AbstractString=DEFAULT_ELL_PRESET, timeout_s::Float64=2.0)
     preset = load_ell_preset(preset_path)
 
     function _apply_home(dev, addr::Int, home_deg::Float64)
@@ -260,7 +304,11 @@ function EllDevice(; port::AbstractString="COM4", preset_path::AbstractString=DE
         return nothing
     end
 
-    connect_device = () -> ELL.open(port)
+    connect_device = () -> try
+        ELL.open(port)
+    catch ex
+        throw(_serial_connect_error("ell", port, ex))
+    end
     init_device = dev -> begin
         _apply_home(dev, preset.power_addr, preset.power_home_deg)
         _apply_home(dev, preset.polarizer_addr, preset.polarizer_home_deg)
@@ -299,18 +347,21 @@ end
 
 function CameraDevice(
     ;
-    ip::AbstractString="192.168.240.181",
+    ip::AbstractString=DEFAULT_PSI_IP,
     timeout_s::Float64=30.0,
-    psi_libpath::AbstractString=PSI.DEFAULT_LIBPATH,
+    psi_libpath::AbstractString=DEFAULT_PSI_LIBPATH,
     scan_timeout_s::Float64=timeout_s,
     acq_time_s::Float64=0.1,
     frames::Int=1,
     temp_c::Union{Nothing,Float64}=nothing,
 )
     state = CameraState(acq_time_s, max(frames, 1), temp_c, scan_timeout_s)
-    ctx = PSI.PSIContext(; libpath=psi_libpath)
-
     connect_device = () -> begin
+        ctx = try
+            PSI.PSIContext(; libpath=psi_libpath)
+        catch ex
+            throw(_file_load_error("PSI library", psi_libpath, ex))
+        end
         ok = PSI.init(ctx)
         ok || error("PSI init failed")
         return PSI.wait2open(ctx, ip)
@@ -374,23 +425,23 @@ end
 
 function build_real_devices(
     ;
-    ell_port::AbstractString="COM4",
+    ell_port::AbstractString=DEFAULT_ELL_PORT,
     ell_preset_path::AbstractString=DEFAULT_ELL_PRESET,
-    lockin_port::AbstractString="COM6",
-    sol_port::AbstractString="COM5",
+    power_web_ip::AbstractString=DEFAULT_POWER_WEB_IP,
+    sol_port::AbstractString=DEFAULT_SOL_PORT,
     sol_conf_dir::AbstractString=DEFAULT_SOL_CONF_DIR,
-    psi_ip::AbstractString="192.168.240.181",
-    psi_libpath::AbstractString=PSI.DEFAULT_LIBPATH,
-    orpheus_test::Bool=false,
-    orpheus_ip::AbstractString="",
-    orpheus_port::AbstractString="",
-    orpheus_id::AbstractString="",
+    psi_ip::AbstractString=DEFAULT_PSI_IP,
+    psi_libpath::AbstractString=DEFAULT_PSI_LIBPATH,
+    orpheus_test::Bool=DEFAULT_ORPHEUS_TEST,
+    orpheus_ip::AbstractString=DEFAULT_ORPHEUS_IP,
+    orpheus_port::AbstractString=DEFAULT_ORPHEUS_PORT,
+    orpheus_id::AbstractString=DEFAULT_ORPHEUS_ID,
 )
     laser = LaserDevice(; test=orpheus_test, ip=orpheus_ip, port=orpheus_port, id=orpheus_id)
     spec = SpectrometerDevice(; port=sol_port, conf_dir=sol_conf_dir)
     ell = EllDevice(; port=ell_port, preset_path=ell_preset_path)
     cam = CameraDevice(; ip=psi_ip, psi_libpath=psi_libpath)
-    pd = LockinDevice(; port=lockin_port)
+    pd = PowerWebDevice(; ip=power_web_ip)
 
     devices = RawDevice[laser, spec, ell, cam, pd]
     hub = DeviceHub(Dict(
