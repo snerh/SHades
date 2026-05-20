@@ -9,7 +9,7 @@ const DEFAULT_IP = get(ENV, "SHADES_POWER_WEB_IP", "192.168.1.52")
 function _extract_power(payload)
     payload isa Number && return Float64(payload)
     if payload isa AbstractDict
-        for key in ("power", "value", "p", "result")
+        for key in ("power", "value", "p", "result","pow")
             if haskey(payload, key) && payload[key] isa Number
                 return Float64(payload[key])
             end

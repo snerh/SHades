@@ -1,0 +1,12 @@
+device_loop[cam]: GetDeviceStatus => connected=false initialized=false healthy=true
+devices_status: cam => connected=false initialized=false healthy=true
+device_loop[laser]: GetDeviceStatus => connected=false initialized=false healthy=true
+devices_status: ell => connected=false initialized=false healthy=true
+device_loop[laser]: GetDeviceStatus => connected=false initialized=false healthy=true
+devices_status: laser => connected=false initialized=false healthy=true
+device_loop[laser]: GetDeviceStatus => connected=false initialized=false healthy=true
+devices_status: pd => connected=false initialized=false healthy=true
+device_loop[laser]: GetDeviceStatus => connected=false initialized=false healthy=true
+devices_status: spec => connected=false initialized=false healthy=true
+refresh_lifecycle!: total=5 connected_count=0 all_connected=false initialized=false
+lifecycle: connected=false initialized=false message=devices: disconnected

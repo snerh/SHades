@@ -5,6 +5,12 @@ using Statistics
 import JSON
 
 const RAW_DIR = @__DIR__
+include(joinpath(RAW_DIR, "Power_web.jl"))
+include(joinpath(RAW_DIR, "ELL.jl"))
+include(joinpath(RAW_DIR, "Orpheus.jl"))
+include(joinpath(RAW_DIR, "psi_base.jl"))
+include(joinpath(RAW_DIR, "Sol.jl"))
+
 const DEFAULT_ELL_PRESET = joinpath(RAW_DIR, "ELL_preset.json")
 const DEFAULT_SOL_CONF_DIR = RAW_DIR
 const DEFAULT_ELL_PORT = get(ENV, "SHADES_ELL_PORT", "COM4")
