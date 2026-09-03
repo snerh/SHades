@@ -1,6 +1,7 @@
 module Power
 
 using ..DeviceManager
+include("devices/raw/Log.jl")
 
 export PowerCommand, StartStab, SetTargetPower, StopStab, ShutdownPower
 export power_loop, LaserPowerUpdate
@@ -15,6 +16,17 @@ struct ShutdownPower <: PowerCommand end
 
 struct LaserPowerUpdate <: SystemEvent
     power::Float64
+end
+
+const POWER_DEADBAND_FRACTION = 0.003
+const POWER_DEADBAND_MIN_RAD = deg2rad(0.001)
+
+function _should_retarget(old_ang::Real, new_ang::Real)
+    old = abs(Float64(old_ang))
+    new = abs(Float64(new_ang))
+    diff = abs(new - old)
+    threshold = max(POWER_DEADBAND_MIN_RAD, POWER_DEADBAND_FRACTION * max(old, new))
+    return diff > threshold
 end
 
 function _power_step!(event_ch, manager, target)
@@ -49,15 +61,17 @@ function _power_step!(event_ch, manager, target)
     frac = clamp(target_eff / safe_power * frac0, 0.0, 1.0)
     new_ang = asin(sqrt(frac)) / 2
 
-    # rotate only on 1 degree or more
-    if abs(new_ang - ang)> pi/180.
+    Log.printlog("Power step: ang = ", ang, "; safe_power = ",safe_power,"; new_ang = ",new_ang)
+
+    # rotate only when the change is large enough to matter
+    if _should_retarget(ang, new_ang)
         put!(manager.devices[:ell], SetParameter(:ang_power, new_ang, reply))
         take!(reply)
     end
     return nothing
 end
 
-function _power_worker(event_ch, manager, running, target, shutdown; period_s=0.1)
+function _power_worker(event_ch, manager, running, target, shutdown; period_s=0.03)
     while !shutdown[]
         if running[]
             try

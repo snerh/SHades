@@ -5,19 +5,13 @@ using Statistics
 import JSON
 
 const RAW_DIR = @__DIR__
-include(joinpath(RAW_DIR, "Power_web.jl"))
-include(joinpath(RAW_DIR, "ELL.jl"))
-include(joinpath(RAW_DIR, "Orpheus.jl"))
-include(joinpath(RAW_DIR, "psi_base.jl"))
-include(joinpath(RAW_DIR, "Sol.jl"))
-
 const DEFAULT_ELL_PRESET = joinpath(RAW_DIR, "ELL_preset.json")
 const DEFAULT_SOL_CONF_DIR = RAW_DIR
 const DEFAULT_ELL_PORT = get(ENV, "SHADES_ELL_PORT", "COM4")
 const DEFAULT_SOL_PORT = get(ENV, "SHADES_SOL_PORT", "COM5")
-const DEFAULT_POWER_WEB_IP = get(ENV, "SHADES_POWER_WEB_IP", "192.168.1.52")
+const DEFAULT_POWER_WEB_IP = get(ENV, "SHADES_POWER_WEB_IP", "192.168.1.77")
 const DEFAULT_PSI_IP = get(ENV, "SHADES_PSI_IP", "192.168.240.181")
-const DEFAULT_PSI_LIBPATH = get(ENV, "SHADES_PSI_LIBPATH", PSI.DEFAULT_LIBPATH)
+const DEFAULT_PSI_LIBPATH = get(ENV, "SHADES_PSI_LIBPATH", "C:\\work\\soft\\SHades2.0\\src2\\devices\\raw\\psi_ccd5.dll")
 const DEFAULT_ORPHEUS_TEST = lowercase(strip(get(ENV, "SHADES_ORPHEUS_TEST", "false"))) in ("1", "true", "yes", "y")
 const DEFAULT_ORPHEUS_IP = get(ENV, "SHADES_ORPHEUS_IP", "")
 const DEFAULT_ORPHEUS_PORT = get(ENV, "SHADES_ORPHEUS_PORT", "")
@@ -28,6 +22,8 @@ include(joinpath(RAW_DIR, "ELL.jl"))
 include(joinpath(RAW_DIR, "Orpheus.jl"))
 include(joinpath(RAW_DIR, "psi_base.jl"))
 include(joinpath(RAW_DIR, "Sol.jl"))
+include("Log.jl")
+
 
 export build_real_devices
 export PowerWebDevice, EllDevice, LaserDevice, SpectrometerDevice, CameraDevice
@@ -175,7 +171,7 @@ function _make_device(
     abort_device::Function,
     close_device::Function;
     timeout_s::Float64=5.0,
-    cmd_size::Int=32,
+    cmd_size::Int=8,
     event_size::Int=32,
 )
     RawDevice(
@@ -207,7 +203,7 @@ function PowerWebDevice(; ip::AbstractString=DEFAULT_POWER_WEB_IP, timeout_s::Fl
             return state.target_power
         elseif name == :power
             try
-                return Power.get(; ip=dev, timeout_s=timeout_s)
+                return Power.get_pow(; ip=dev, timeout_s=Int64(round(timeout_s)))
             catch ex
                 throw(ErrorException("Failed to read power from Power_web at $(repr(dev)): $(sprint(showerror, ex))"))
             end
@@ -235,9 +231,12 @@ function LaserDevice(
     connect_device = () -> Orpheus.client(; test=test, ip=ip, port=port, id=id)
     init_device = dev -> :ok
     set_param = (dev, name, value) -> begin
+        Log.printlog("LaserDevice -> set_param: state = ",state,"; name =", name,"; val = ", value)
         if name == :wl
             state.wl = Float64(value)
+            Log.printlog("LaserDevice -> set_param: before setWL")
             Orpheus.setWL(dev, state.wl, state.interaction)
+            Log.printlog("LaserDevice -> set_param: after setWL")
         elseif name == :interaction
             state.interaction = String(value)
         end
@@ -301,12 +300,27 @@ function SpectrometerDevice(; port::AbstractString=DEFAULT_SOL_PORT, conf_dir::A
     return _make_device(connect_device, init_device, set_param, read_signal, abort_device, close_device; timeout_s=timeout_s)
 end
 
-function EllDevice(; port::AbstractString=DEFAULT_ELL_PORT, preset_path::AbstractString=DEFAULT_ELL_PRESET, timeout_s::Float64=2.0)
+function EllDevice(; port::AbstractString=DEFAULT_ELL_PORT, preset_path::AbstractString=DEFAULT_ELL_PRESET, timeout_s::Float64=120.0)
     preset = load_ell_preset(preset_path)
+    did_initial_home = Ref(false)
 
     function _apply_home(dev, addr::Int, home_deg::Float64)
         ELL.set_offset(dev, addr, deg2rad(home_deg))
         ELL.home(dev, addr)
+        ELL.wait_ready(dev,addr)
+        return nothing
+    end
+
+    function _move_and_wait!(dev, addr::Int, ang::Float64)
+        ELL.ma(dev, addr, ang)
+        ELL.wait_ready(dev, addr)
+        return nothing
+    end
+
+    function _wait_ready_only(dev)
+        ELL.wait_ready(dev, preset.power_addr)
+        ELL.wait_ready(dev, preset.polarizer_addr)
+        ELL.wait_ready(dev, preset.analyzer_addr)
         return nothing
     end
 
@@ -316,20 +330,25 @@ function EllDevice(; port::AbstractString=DEFAULT_ELL_PORT, preset_path::Abstrac
         throw(_serial_connect_error("ell", port, ex))
     end
     init_device = dev -> begin
-        _apply_home(dev, preset.power_addr, preset.power_home_deg)
-        _apply_home(dev, preset.polarizer_addr, preset.polarizer_home_deg)
-        _apply_home(dev, preset.analyzer_addr, preset.analyzer_home_deg)
+        if !did_initial_home[]
+            _apply_home(dev, preset.power_addr, preset.power_home_deg)
+            _apply_home(dev, preset.polarizer_addr, preset.polarizer_home_deg)
+            _apply_home(dev, preset.analyzer_addr, preset.analyzer_home_deg)
+            did_initial_home[] = true
+        else
+            _wait_ready_only(dev)
+        end
         return :ok
     end
     set_param = (dev, name, value) -> begin
         if name == :polarizer
             ang = _deg_to_ell_rad(Float64(value), preset.half_wave)
-            ELL.ma(dev, preset.polarizer_addr, ang)
+            _move_and_wait!(dev, preset.polarizer_addr, ang)
         elseif name == :analyzer
             ang = _deg_to_ell_rad(Float64(value), preset.half_wave)
-            ELL.ma(dev, preset.analyzer_addr, ang)
+            _move_and_wait!(dev, preset.analyzer_addr, ang)
         elseif name == :ang_power
-            ELL.ma(dev, preset.power_addr, Float64(value))
+            _move_and_wait!(dev, preset.power_addr, Float64(value))
         end
         return :ok
     end
@@ -384,7 +403,7 @@ function CameraDevice(
             state.acq_time_s = Float64(value)
             PSI.set_params(dev, time=_sec_to_psi_time(state.acq_time_s))
         elseif name == :frames
-            state.frames = max(Int(round(Float64(value))), 1)
+            state.frames = max(Int(round(value)), 1)
         elseif name == :temp
             state.temp_c = Float64(value)
             PSI.set_temp(dev; temp=Int(round(state.temp_c)))

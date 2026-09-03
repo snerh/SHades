@@ -8,25 +8,51 @@ module ELL
     s
     lk::ReentrantLock
   end
+  
+  function toInt64(str)
+    return Int64(reinterpret(Int32,parse(UInt32, str, base=16)))
+  end
 
-  function wait2read2(s, timeout=1)
-    LSP.set_read_timeout(s, timeout)
-    try
-      res = LSP.readline(s)
-      addr = parse(Int, res[1])
-      comm = res[2:3]
+  _expected_response(comm) = comm in ("gp", "ma", "mr", "ho") ? "PO" : comm in ("so", "gs") ? "GS" : nothing
 
-      Log.printlog("ELL read: ", addr, comm, res[4:end])
-      return (addr, comm, res[4:end])
-    catch e
-      if isa(e, LSP.Timeout)
-        @warn "ELL timeout"
-        Log.printlog("ELL read timeout")
-        LSP.sp_flush(s, LSP.SP_BUF_BOTH)
-        return (-1, "", "0")
+  function _set_read_timeout_seconds(s, seconds::Real)
+    # LibSerialPort stores the timeout in UInt32 milliseconds, so passing
+    # fractional seconds can raise InexactError during conversion.
+    LSP.set_read_timeout(s, max(1, ceil(Int, seconds)))
+  end
+
+  function wait2read2(s, timeout=15; expected_addr=nothing, expected_comm=nothing)
+    deadline = time() + timeout
+
+    while time() < deadline
+      try
+        _set_read_timeout_seconds(s, deadline - time())
+        res = strip(LSP.readline(s))
+        length(res) >= 3 || continue
+        addr = parse(Int, string(res[1]))
+        comm = res[2:3]
+        payload = length(res) >= 4 ? res[4:end] : ""
+
+        if (expected_addr === nothing || addr == expected_addr) &&
+           (expected_comm === nothing || comm == expected_comm)
+          Log.printlog("ELL read: ", addr, comm, payload)
+          return (addr, comm, payload)
+        end
+
+        Log.printlog("ELL stale read: ", addr, comm, payload, " expected=", expected_addr, expected_comm)
+      catch e
+        if isa(e, LSP.Timeout)
+          break
+        end
+        Log.printlog("ELL read error: ", sprint(showerror, e))
+        break
       end
-      rethrow()
     end
+
+    @warn "ELL timeout"
+    Log.printlog("ELL read timeout expected=", expected_addr, expected_comm)
+    #LSP.sp_flush(s, LSP.SP_BUF_BOTH)
+    return (-1, "", "-1")
   end
 
   function write(h::ELLHandle, add, comm, val=nothing; pad=8)
@@ -36,17 +62,19 @@ module ELL
       s_val = ""
     end
     Log.printlog("ELL write:", add, comm, s_val)
+    #LSP.sp_flush(h.s, LSP.SP_BUF_BOTH)
     LSP.write(h.s, "$add$comm$s_val")
     LSP.flush(h.s)
   end
 
-  function resp(h::ELLHandle, add, comm, val=nothing; pad=8)
+  function resp(h::ELLHandle, add, comm, val=nothing; pad=8, timeout=15)
     lock(h.lk)
     try
       write(h, add, comm, val; pad=pad)
-      return wait2read2(h.s)
-    catch
-      @warn "Ell resp error"
+      return wait2read2(h.s, timeout; expected_addr=add, expected_comm=_expected_response(comm))
+    catch ex
+      @warn "Ell resp error" exception=(ex, catch_backtrace())
+      Log.printlog("ELL resp error: ", sprint(showerror, ex))
       return (-1, "", "0")
     finally
       unlock(h.lk)
@@ -57,7 +85,7 @@ module ELL
     s = LSP.open(com, 9600)
     try
       LSP.sp_flush(s, LSP.SP_BUF_BOTH)
-      LSP.set_read_timeout(s, 1)
+      _set_read_timeout_seconds(s, 3)
       return ELLHandle(s, ReentrantLock())
     catch
       LSP.close(s)
@@ -85,17 +113,20 @@ module ELL
     pulses = Int64(round(ang / (2 * pi) * PULSES_PER_TURN))
     a, c, r = resp(h, add, comm, pulses)
     if a == add
-      return parse(Int64, r, base=16)
+      return toInt64(r)
     else
       error("ELL wrong address: $a\n")
     end
   end
 
   function set_offset(h::ELLHandle, add, ang) # ang in radians
+ 	  Log.printlog("ELL set_offset position: ",ang)
     pulses = Int64(round(ang / (2 * pi) * PULSES_PER_TURN))
     a, c, r = resp(h, add, "so", pulses)
     if a == add
-      return parse(Int64, r, base=16)
+	  res = toInt64(r)
+	  Log.printlog("ELL set_offset result: ",res)
+	  return res
     else
       error("ELL wrong address: $a\n")
     end
@@ -104,14 +135,24 @@ module ELL
   ma(h::ELLHandle, add, ang) = move(h, add, "ma", ang)
   mr(h::ELLHandle, add, ang) = move(h, add, "mr", ang)
   home(h::ELLHandle, add) = resp(h, add, "ho", 0, pad=1)
+  gs(h::ELLHandle, add) = resp(h, add, "gs") # get_position
 
-  function gp(h::ELLHandle, add)
+  function gp(h::ELLHandle, add) #get_status
     a, c, r = resp(h, add, "gp")
     if a == -1
       error("Get position error, wrong address: $a")
     end
-    ang = parse(Int64, r, base=16) / PULSES_PER_TURN * (2 * pi)
+    ang = toInt64(r) / PULSES_PER_TURN * (2 * pi)
     return ang
   end
 
+  function wait_ready(h::ELLHandle, add)
+    while true
+      (a,c,r) = ELL.gs(h, add)
+
+      a == add && toInt64(r) == 0 && break
+
+      sleep(0.02)
+    end
+  end
 end #module

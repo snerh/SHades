@@ -2,15 +2,15 @@
   "ell": {
     "power": {
       "address": 1,
-      "home": 33.6
+      "home": 86.0
     },
     "polarizer": {
       "address": 0,
-      "home": 129.8
+      "home": 12.0
     },
     "analyzer": {
       "address": 2,
-      "home": 10.0
+      "home": 61.0
     },
     "half_wave": true
   }

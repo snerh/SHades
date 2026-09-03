@@ -12,7 +12,10 @@ include(joinpath(@__DIR__, "..", "src2", "time_utils.jl"))
 include(joinpath(@__DIR__, "..", "src2", "dataset_io.jl"))
 include(joinpath(@__DIR__, "..", "src2", "persistence.jl"))
 include(joinpath(@__DIR__, "..", "src2", "app_logic.jl"))
+include(joinpath(@__DIR__, "..", "src2", "measurement.jl"))
+include(joinpath(@__DIR__, "..", "src2", "power.jl"))
 include(joinpath(@__DIR__, "..", "src2", "app_controller.jl"))
+include(joinpath(@__DIR__, "..", "src2", "reducer.jl"))
 
 end
 
@@ -20,12 +23,14 @@ using .SHadesLite.AppLogic
 using .SHadesLite.AppController: Controller, load_presets!, save_presets!, append_preset!, delete_preset_at!, build_preset, publish_focus_params!, refresh_lifecycle!, connect_devices!, init_devices!, disconnect_devices!, toggle_power_stabilization!, select_output_dir!, start_scan!, start_focus!, stop_measurement!
 using .SHadesLite.AppEvents: SyncRawParams, DirectoryLoaded, SetDeviceLifecycle
 using .SHadesLite.DatasetIO
-using .SHadesLite.DeviceManager: DeviceHub, DeviceCommand, ConnectDevice, InitDevice, DisconnectDevice, GetDeviceStatus
+using .SHadesLite.DeviceManager: DeviceHub, DeviceCommand, ConnectDevice, InitDevice, DisconnectDevice, GetDeviceStatus, DeviceError, ReadSignal, SetParameter
 using .SHadesLite.Parameters
 using .SHadesLite.ParameterParser
 using .SHadesLite.Persistence: PresetSpec, ensure_required_params, load_presets, save_presets, next_preset_name
 using .SHadesLite.State
 using .SHadesLite.TimeUtils: parse_duration_seconds, try_parse_duration_seconds
+using .SHadesLite.Reducer: reduce!
+using .SHadesLite.Power: _should_retarget, _power_step!, LaserPowerUpdate
 
 function make_controller(;
     device_hub=DeviceHub(Dict{Symbol,Channel{DeviceCommand}}()),
@@ -300,6 +305,65 @@ end
     @test cmd.params[:wl] == 500.0
     @test cmd.params[:inter] == "SIG"
     @test !haskey(cmd.params, :sol_wl)
+end
+
+@testset "Reducer isolates power errors" begin
+    state = AppState()
+    state.measurement_state = State.Running
+    state.power_state = State.Stabilizing
+
+    reduce!(state, DeviceError("Power loop failed: Read timeout pd.power"))
+    @test state.measurement_state == State.Running
+    @test state.power_state == State.ErrorPower
+
+    reduce!(state, DeviceError("Read timeout ell.gp"))
+    @test state.measurement_state == State.Error
+    @test state.power_state == State.ErrorPower
+end
+
+@testset "Power loop deadband" begin
+    @test !_should_retarget(0.2, 0.2001)
+    @test _should_retarget(0.2, 0.207)
+    @test !_should_retarget(0.0, deg2rad(0.005))
+    @test _should_retarget(0.0, deg2rad(0.02))
+
+    pd_ch = Channel{Any}(16)
+    ell_ch = Channel{Any}(16)
+    moved = Ref(false)
+
+    pd_task = @async begin
+        for cmd in pd_ch
+            if cmd isa ReadSignal
+                if cmd.name == :target_power || cmd.name == :power
+                    put!(cmd.reply, 1000.0)
+                else
+                    put!(cmd.reply, 0.0)
+                end
+            end
+        end
+    end
+
+    ell_task = @async begin
+        for cmd in ell_ch
+            if cmd isa ReadSignal && cmd.name == :ang_power
+                put!(cmd.reply, 0.2)
+            elseif cmd isa SetParameter && cmd.name == :ang_power
+                moved[] = true
+                put!(cmd.reply, :ok)
+            end
+        end
+    end
+
+    manager = (devices=Dict(:pd => pd_ch, :ell => ell_ch),)
+    event_ch = Channel{Any}(16)
+    _power_step!(event_ch, manager, 1000.0)
+    @test take!(event_ch) isa LaserPowerUpdate
+    @test !moved[]
+
+    close(pd_ch)
+    close(ell_ch)
+    wait(pd_task)
+    wait(ell_task)
 end
 
 @testset "Preset persistence and dataset IO" begin

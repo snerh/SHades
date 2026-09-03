@@ -15,6 +15,7 @@ const _REQUIRED_DEFAULTS = Pair{Symbol,String}[
     :analyzer => "0",
     :acq_time => "100 ms",
     :cam_temp => "-10",
+    :slit => "500",
     :frames => "2",
 ]
 

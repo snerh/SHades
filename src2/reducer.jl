@@ -9,6 +9,27 @@ using ..AppLogic: sync_raw_params!
 
 export reduce!
 
+function _is_power_device_error(msg::AbstractString)
+    startswith(msg, "Power loop failed:") && return true
+    startswith(msg, "Read timeout pd.") && return true
+    startswith(msg, "Retry read timeout pd.") && return true
+    startswith(msg, "Read error pd.") && return true
+    startswith(msg, "Retry read error pd.") && return true
+    startswith(msg, "Timeout setting pd.") && return true
+    startswith(msg, "Retry timeout setting pd.") && return true
+    startswith(msg, "Error setting pd.") && return true
+    startswith(msg, "Retry error setting pd.") && return true
+    startswith(msg, "Recover connect timeout on pd") && return true
+    startswith(msg, "Recover connect error on pd") && return true
+    startswith(msg, "Connect timeout on pd") && return true
+    startswith(msg, "Connect error on pd") && return true
+    startswith(msg, "Init timeout on pd") && return true
+    startswith(msg, "Init error on pd") && return true
+    startswith(msg, "Disconnect failed on pd") && return true
+    startswith(msg, "Close failed on pd") && return true
+    return false
+end
+
 function reduce!(state::AppState, ev)
 
     if ev isa MeasurementStarted
@@ -55,8 +76,12 @@ function reduce!(state::AppState, ev)
         state.devices.status = ev.message
 
     elseif ev isa DeviceError
-        state.measurement_state = State.Error
-        state.power_state = State.ErrorPower
+        if _is_power_device_error(ev.message)
+            state.power_state = State.ErrorPower
+        else
+            state.measurement_state = State.Error
+            state.power_state = State.ErrorPower
+        end
     end
 end
 

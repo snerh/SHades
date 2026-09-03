@@ -4,12 +4,12 @@ include("Log.jl")
 using HTTP
 using JSON
 
-const DEFAULT_IP = get(ENV, "SHADES_POWER_WEB_IP", "192.168.1.52")
+const DEFAULT_IP = get(ENV, "SHADES_POWER_WEB_IP", "192.168.1.77")
 
 function _extract_power(payload)
     payload isa Number && return Float64(payload)
     if payload isa AbstractDict
-        for key in ("power", "value", "p", "result","pow")
+        for key in ("power", "value", "p", "result")
             if haskey(payload, key) && payload[key] isa Number
                 return Float64(payload[key])
             end
@@ -18,7 +18,7 @@ function _extract_power(payload)
     error("Unsupported Power_web response: $(repr(payload))")
 end
 
-function get(; ip::AbstractString=DEFAULT_IP, timeout_s::Real=2)
+function get_pow(; ip::AbstractString=DEFAULT_IP, timeout_s::Int64=2)
     url = "http://$(ip)/power"
     Log.printlog("Power_web GET ", url, " timeout_s=", timeout_s)
     resp = HTTP.get(url; readtimeout=timeout_s)

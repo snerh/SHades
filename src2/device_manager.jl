@@ -239,12 +239,16 @@ function device_loop(raw_dev, name::Symbol=:device)
                     put!(cmd.reply, :not_ready)
                     continue
                 end
+                dev
                 ok = call_with_timeout(() -> raw_dev.set_param(dev, cmd.name, cmd.value), t)
                 if ok === :timeout
                     healthy = false
-                    put!(event_ch, DeviceError("Timeout setting $(name).$(cmd.name)"))
+                    # Временно отключил сообщение об ошибке!!!
+                    # put!(event_ch, DeviceError("Timeout setting $(name).$(cmd.name)"))
                     if _recover!()
                         ok2 = call_with_timeout(() -> raw_dev.set_param(dev, cmd.name, cmd.value), t)
+                        Log.printlog("device_loop[", name, "]: result of set_param after recover!:",ok2)
+
                         if ok2 === :timeout
                             healthy = false
                             put!(event_ch, DeviceError("Retry timeout setting $(name).$(cmd.name)"))
@@ -261,9 +265,11 @@ function device_loop(raw_dev, name::Symbol=:device)
                     end
                 elseif ok isa Exception
                     healthy = false
-                    put!(event_ch, DeviceError("Error setting $(name).$(cmd.name): $(sprint(showerror, ok))"))
+                    # Временно отключил сообщение об ошибке!!!
+                    # put!(event_ch, DeviceError("Error setting $(name).$(cmd.name): $(sprint(showerror, ok))"))
                     if _recover!()
                         ok2 = call_with_timeout(() -> raw_dev.set_param(dev, cmd.name, cmd.value), t)
+                        Log.printlog("device_loop[", name, "]: result of set_param after recover!:",ok2)
                         if ok2 === :timeout
                             healthy = false
                             put!(event_ch, DeviceError("Retry timeout setting $(name).$(cmd.name)"))
@@ -290,9 +296,10 @@ function device_loop(raw_dev, name::Symbol=:device)
                 val = call_with_timeout(() -> raw_dev.read_signal(dev, cmd.name), t)
                 if val === :timeout
                     healthy = false
-                    put!(event_ch, DeviceError("Read timeout $(name).$(cmd.name)"))
+                    #put!(event_ch, DeviceError("Read timeout $(name).$(cmd.name)"))
                     if _recover!()
                         val2 = call_with_timeout(() -> raw_dev.read_signal(dev, cmd.name), t)
+                        Log.printlog("device_loop[", name, "]: result of read_signal after recover!:",val2)
                         if val2 === :timeout
                             healthy = false
                             put!(event_ch, DeviceError("Retry read timeout $(name).$(cmd.name)"))
@@ -309,9 +316,10 @@ function device_loop(raw_dev, name::Symbol=:device)
                     end
                 elseif val isa Exception
                     healthy = false
-                    put!(event_ch, DeviceError("Read error $(name).$(cmd.name): $(sprint(showerror, val))"))
+                    #put!(event_ch, DeviceError("Read error $(name).$(cmd.name): $(sprint(showerror, val))"))
                     if _recover!()
                         val2 = call_with_timeout(() -> raw_dev.read_signal(dev, cmd.name), t)
+                        Log.printlog("device_loop[", name, "]: result of read_signal after recover!:",val2)
                         if val2 === :timeout
                             healthy = false
                             put!(event_ch, DeviceError("Retry read timeout $(name).$(cmd.name)"))
@@ -452,7 +460,7 @@ function MockCamDevice()
     )
 end
 
-function call_with_timeout(f, timeout)
+function call_with_timeout(f, timeout; cleanup_timeout=5.0)
     t = @async try
         f()
     catch ex
@@ -461,6 +469,17 @@ function call_with_timeout(f, timeout)
     status = timedwait(() -> istaskdone(t), timeout)
     if status == :ok
         return fetch(t)
+    end
+
+    try
+        schedule(t, InterruptException(); error=true)
+    catch ex
+        Log.printlog("call_with_timeout: failed to interrupt timed-out task: ", sprint(showerror, ex))
+    end
+
+    cleanup_status = timedwait(() -> istaskdone(t), cleanup_timeout)
+    if cleanup_status != :ok
+        Log.printlog("call_with_timeout: timed-out task is still running after cleanup timeout")
     end
     return :timeout
 end

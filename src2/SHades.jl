@@ -18,6 +18,8 @@ include("app_controller.jl")
 include("view/gtk_ui.jl")
 include("reducer.jl")
 include("devices/raw/raw_devices.jl")
+include("devices/raw/Log.jl")
+
 
 using .Domain
 using .Parameters
@@ -73,6 +75,8 @@ function _start_runtime(devices::Vector{RawDevice}, device_hub::DeviceHub)
     for (name, ch) in device_hub.devices
         name_by_channel[ch] = name
     end
+    Log.printlog("Start_runtime: name_by_channel = ",name_by_channel)
+
     device_tasks = [@async device_loop(dev, get(name_by_channel, dev.device_cmd, :device)) for dev in devices]
     t_measure = @async measurement_loop(meas_cmd, meas_events, device_hub)
     t_power = @async power_loop(power_cmd, power_events, device_hub)

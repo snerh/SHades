@@ -66,6 +66,18 @@ function Spec(s)
     Spec(s, [], [], [], ReentrantLock())
 end
 
+function readl(s,stop='\n')
+    acc = ""
+    while true
+        ch = LSP.read(s,Char)
+        if ch == stop || ch == '\06'
+            return chomp(acc)
+        else
+            acc=acc*ch
+        end
+    end
+end
+
 function open(port = "COM5"; conf_dir = ".")
     s = LSP.open(port, 9600)
     tmp = Spec(s)
@@ -107,7 +119,7 @@ end
 function wait2read(s,timeout = 20)
     LSP.set_read_timeout(s, timeout)
     try
-        return LSP.readline(s)
+        return readl(s)
     catch e
         if isa(e, LSP.Timeout)
             @warn "SOL read timeout"

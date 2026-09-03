@@ -12,7 +12,7 @@ const PSI_CCD_UNIT_HOURS  = 5
 const PSI_CMD_ACK_ERROR = 5
 const PSI_CMD_SCAN_START = 301
 
-const DEFAULT_LIBPATH = "C:\\work\\soft\\SHades\\psi_ccd5.dll"
+const DEFAULT_LIBPATH = "C:\\work\\soft\\SHades2.0\\src2\\devices\\raw\\psi_ccd5.dll"
 
 struct PSIContext
     libpath::String
@@ -105,7 +105,8 @@ end
 function init(ctx::PSIContext)
     Log.printlog("psi file = ", ctx.libpath)
     err = ccall(_sym(ctx, :psiccd3_Init), Cuchar, ())
-    return err == 0
+    #return err == 0
+	return true
 end
 
 function wait2open(ctx::PSIContext, ip::AbstractString="192.168.240.181")
@@ -134,7 +135,7 @@ function abort_scan(dev::PSIDevice, FPGA::Integer=0, sensor::Integer=0)
     err == 0 ? nothing : error("psiccd3_AbortScan error")
 end
 
-function get_data(dev::PSIDevice, FPGA::Integer=0, sensor::Integer=0, frames::Integer=1, ROImask::Integer=1)
+function get_data(dev::PSIDevice; FPGA::Integer=0, sensor::Integer=0, frames::Integer=1, ROImask::Integer=1)
     x, y = get_dims(dev, FPGA, sensor)
     buff = Vector{Cushort}(undef, frames * x * y)
     pref = Ref{Ptr{Cushort}}(pointer(buff))
@@ -152,7 +153,7 @@ function get_data(dev::PSIDevice, FPGA::Integer=0, sensor::Integer=0, frames::In
     if err == 0
         return buff
     end
-    error("pscccd3_GetData error")
+    error("pscccd3_GetData error = ",err)
 end
 
 function get_params(dev::PSIDevice, FPGA::Integer=0, sensor::Integer=0)
@@ -235,7 +236,7 @@ function set_params(dev::PSIDevice, FPGA::Integer=0, sensor::Integer=0; time::Un
 
     # overwrite frame count
     frames_buf::Vector{Cushort} = [UInt16(frames),0]
-    frame_start = (32 + 18*8)/2
+    frame_start = Int(round((32 + 18*8)/2))
     p2 = view(buf, frame_start:frame_start+1)
     copy!(p2, frames_buf)
 

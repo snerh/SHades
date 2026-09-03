@@ -25,21 +25,26 @@ module Orpheus
     return "http://$(c.ip):$(c.port)/$(c.id)/v0/PublicAPI$path"
   end
 
-  function put(c::OrpheusClient, url::AbstractString, body)
+  function _put(c::OrpheusClient, url::AbstractString, body)
+    Log.printlog(_url(c, url))
     resp = HTTP.put(_url(c, url), ["Content-Type" => "application/json"], body)
     return String(resp.body)
   end
 
-  function get(c::OrpheusClient, url::AbstractString)
+  function _get(c::OrpheusClient, url::AbstractString)
     Log.printlog(_url(c, url))
     resp = HTTP.get(_url(c, url))
     return String(resp.body)
   end
 
   function setWL(c::OrpheusClient, wl, interaction::AbstractString="SIG")
+    Log.printlog("Orpheus -> setWL: start")
     body = JSON.json(Dict(["Wavelength" => wl, "Interaction" => interaction]))
-    str = put(c, "/Optical/WavelengthControl/SetWavelength", body)
+    Log.printlog("Orpheus -> setWL: body = ", body)
+    str = _put(c, "/Optical/WavelengthControl/SetWavelength", body)
+    Log.printlog("Orpheus -> setWL: resp = ", str)
     dict = JSON.parse(str)
+    Log.printlog("Orpheus -> setWL: dict = ", dict)
     if dict["IsSuccess"] != true
       error("SetWavelength error")
     end
@@ -47,7 +52,7 @@ module Orpheus
   end
 
   function getWL(c::OrpheusClient)
-    resp = get(c, "/Optical/WavelengthControl/Output/Wavelength")
+    resp = _get(c, "/Optical/WavelengthControl/Output/Wavelength")
     return parse(Float64, resp)
   end
 end

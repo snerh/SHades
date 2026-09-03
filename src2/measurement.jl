@@ -1,4 +1,5 @@
 module Measurement
+include("devices/raw/Log.jl")
 
 using Statistics
 using ..Domain
@@ -94,15 +95,18 @@ end
 
 _frames(p::Dict{Symbol,Any}) = Int(round(Float64(get(p, :frames, 1))))
 
-function _normalize_params!(p::Dict{Symbol,Any})
-    if haskey(p, :sol_wl)
-        p[:sol_wl] = round(Float64(p[:sol_wl]) / 20.0) * 20.0
-    end
-    return p
-end
+#function _normalize_params!(p::Dict{Symbol,Any})
+#    if haskey(p, :sol_wl)
+#        p[:sol_wl] = round(Float64(p[:sol_wl]) / 20.0) * 20.0
+#    end
+#    return p
+#end
 
 function _apply_new_params!(oldp::Dict{Symbol,Any}, newp::Dict{Symbol,Any}, manager)
+    Log.printlog("====================================")
+    Log.printlog("Apply new parameters: ",newp)
     for (k, v) in newp
+        Log.printlog("Setting ",k," to val ",v)
         if get(oldp, k, :__none__) == v
             continue
         end
@@ -144,7 +148,7 @@ end
 
 function _capture_background!(manager, p::Dict{Symbol,Any})
     _set_param!(manager, :spec, :shutter, false)
-    sleep(0.1)
+    #sleep(0.1)
     back = _acquire_with_back(manager, p, nothing)
     _set_param!(manager, :spec, :shutter, true)
     return back
@@ -229,7 +233,7 @@ end
 
 function _measurement_start!(manager, scan_axes::ScanAxisSet)
     first_point = _first_point(scan_axes)
-    _normalize_params!(first_point)
+    #_normalize_params!(first_point)
 
     if has_axis(scan_axes, :power)
         _set_param!(manager, :pd, :target_power, 0.0001)
@@ -237,7 +241,7 @@ function _measurement_start!(manager, scan_axes::ScanAxisSet)
 
     oldp = _apply_new_params!(Dict{Symbol,Any}(), first_point, manager)
     back = _capture_background!(manager, first_point)
-    sleep(0.1)
+    #sleep(0.1)
 
     return MeasurementContext(oldp, back, Float64[], Float64[])
 end
@@ -282,8 +286,8 @@ function _measurement_step!(
         (p, data) = DatasetIO.load_raw_file(file_path)
         reused = true
     else
-        delay_s = Float64(get(p, :delay_s, 1.5))
-        delay_s > 0 && sleep(delay_s)
+        #delay_s = Float64(get(p, :delay_s, 1.5))
+        #delay_s > 0 && sleep(delay_s)
         data = _acquire_with_back(manager, p, ctx.back)
     end
 
