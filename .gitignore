@@ -29,3 +29,6 @@ JuliaLocalPreferences.toml
 
 tmp/
 *.dat
+log.txt
+*.dll
+*.pdf
