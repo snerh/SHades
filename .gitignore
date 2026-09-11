@@ -28,7 +28,10 @@ LocalPreferences.toml
 JuliaLocalPreferences.toml
 
 tmp/
+.vscode/
 *.dat
 log.txt
+trace.jl
 *.dll
 *.pdf
+*.so

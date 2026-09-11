@@ -276,7 +276,7 @@ function _render_raw_canvas!(canvas, state::AppState)
     h = Float64(Gtk.height(canvas))
     render_signal_plot!(
         ctx, w, h, raw_points(state);
-        xaxis=:idx, yaxis=:value, mode=:line, zaxis=:value, log_scale=false, title="raw camera data",
+        xaxis=:cam_wl, yaxis=:cam_int, mode=:line, zaxis=:cam_int, log_scale=false, title="raw camera data",
     )
     Gtk.draw(canvas)
     return nothing
@@ -319,7 +319,7 @@ function render!(ui::GtkApp, state::AppState)
     Gtk.set_gtk_property!(ui.points_label, :label, "points: $(points)")
     file_lbl = state.measurement.last_saved_file === nothing ? "saved: -" : "saved: $(basename(state.measurement.last_saved_file))"
     Gtk.set_gtk_property!(ui.file_label, :label, file_lbl)
-    Gtk.set_gtk_property!(ui.dir_label, :label, "dir: $(state.session.config.dir)")
+    #Gtk.set_gtk_property!(ui.dir_label, :label, "dir: $(state.session.config.dir)")
 
     _update_plot_controls!(ui)
     _update_controls_state!(ui, state)

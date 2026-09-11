@@ -1,7 +1,6 @@
-{"params":[{"wl":"700:5:800"},{"sol_wl":"=20*round(wl/40)"},{"inter":"IDL"},{"power":"100"},{"polarizer":"0"},{"analyzer":"0"},{"acq_time":"500 ms"},{"cam_temp":"-10"},{"frames":"2"}],"name":"SHG1"}
-{"params":[{"wl":"600"},{"sol_wl":"=20*round(wl/40)"},{"inter":"IDL"},{"power":"100"},{"polarizer":"0:10:180"},{"analyzer":"=polarizer+90"},{"acq_time":"100 ms"},{"cam_temp":"-10"},{"frames":"2"}],"name":"SHG2"}
-{"params":[{"sol_wl":"400:60:640"},{"wl":"800:1:950"},{"inter":"SIG"},{"power":"150"},{"polarizer":"0"},{"analyzer":"0"},{"acq_time":"2 s"},{"slit":"500"},{"cam_temp":"-10"},{"frames":"1"}],"name":"ZnSe:Fe_PLE"}
-{"params":[{"sol_wl":"640"},{"wl":"900"},{"inter":"SIG"},{"power":"150"},{"polarizer":"0"},{"analyzer":"0"},{"acq_time":"1 s"},{"slit":"1000"},{"cam_temp":"-10"},{"frames":"1"}],"name":"Preset 1"}
-{"params":[{"sol_wl":"400:60:640"},{"wl":"800:1:950"},{"inter":"SIG"},{"power":"150"},{"polarizer":"0"},{"analyzer":"0"},{"acq_time":"1 s"},{"slit":"1000"},{"cam_temp":"-10"},{"frames":"1"}],"name":"Preset 2"}
-{"params":[{"sol_wl":"400:60:640"},{"wl":"800:1:950"},{"inter":"SIG"},{"power":"1000"},{"polarizer":"0"},{"analyzer":"0:90:90"},{"acq_time":"1 s"},{"slit":"300"},{"cam_temp":"-10"},{"frames":"1"}],"name":"Preset 3"}
-{"params":[{"sol_wl":"420:70:630"},{"wl":"800:1:900"},{"inter":"SIG"},{"power":"1000"},{"polarizer":"0"},{"analyzer":"0:90:90"},{"acq_time":"1 s"},{"slit":"1000"},{"cam_temp":"-10"},{"frames":"1"}],"name":"Preset 4"}
+{"name":"SHG1","params":[{"wl":"700:5:800"},{"sol_wl":"=20*round(wl/40)"},{"inter":"IDL"},{"power":"100"},{"polarizer":"0"},{"analyzer":"0"},{"acq_time":"500 ms"},{"cam_temp":"-10"},{"frames":"2"},{"slit":"500"}]}
+{"name":"SHG2","params":[{"wl":"600"},{"sol_wl":"=20*round(wl/40)"},{"inter":"IDL"},{"power":"100"},{"polarizer":"0:10:180"},{"analyzer":"=polarizer+90"},{"acq_time":"100 ms"},{"cam_temp":"-10"},{"frames":"2"},{"slit":"500"}]}
+{"name":"ZnSe:Fe_PLE","params":[{"sol_wl":"400:60:640"},{"wl":"800:1:950"},{"inter":"SIG"},{"power":"150"},{"polarizer":"0"},{"analyzer":"0"},{"acq_time":"2 s"},{"slit":"500"},{"cam_temp":"-10"},{"frames":"1"}]}
+{"name":"Preset 1","params":[{"sol_wl":"640"},{"wl":"900"},{"inter":"SIG"},{"power":"150"},{"polarizer":"0"},{"analyzer":"0"},{"acq_time":"1 s"},{"slit":"1000"},{"cam_temp":"-10"},{"frames":"1"}]}
+{"name":"Preset 2","params":[{"sol_wl":"400:60:640"},{"wl":"800:1:950"},{"inter":"SIG"},{"power":"150"},{"polarizer":"0"},{"analyzer":"0"},{"acq_time":"1 s"},{"slit":"1000"},{"cam_temp":"-10"},{"frames":"1"}]}
+{"name":"Preset 4","params":[{"sol_wl":"420:70:630"},{"wl":"800:1:900"},{"inter":"SIG"},{"power":"1000"},{"polarizer":"0"},{"analyzer":"0:90:90"},{"acq_time":"1 s"},{"slit":"1000"},{"cam_temp":"-10"},{"frames":"1"}]}

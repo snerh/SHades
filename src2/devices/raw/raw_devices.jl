@@ -11,7 +11,7 @@ const DEFAULT_ELL_PORT = get(ENV, "SHADES_ELL_PORT", "COM4")
 const DEFAULT_SOL_PORT = get(ENV, "SHADES_SOL_PORT", "COM5")
 const DEFAULT_POWER_WEB_IP = get(ENV, "SHADES_POWER_WEB_IP", "192.168.1.77")
 const DEFAULT_PSI_IP = get(ENV, "SHADES_PSI_IP", "192.168.240.181")
-const DEFAULT_PSI_LIBPATH = get(ENV, "SHADES_PSI_LIBPATH", "C:\\work\\soft\\SHades2.0\\src2\\devices\\raw\\psi_ccd5.dll")
+const DEFAULT_PSI_LIBPATH = get(ENV, "SHADES_PSI_LIBPATH", joinpath(RAW_DIR, "\\src\\devices\\raw\\psi_ccd5.dll"))
 const DEFAULT_ORPHEUS_TEST = lowercase(strip(get(ENV, "SHADES_ORPHEUS_TEST", "false"))) in ("1", "true", "yes", "y")
 const DEFAULT_ORPHEUS_IP = get(ENV, "SHADES_ORPHEUS_IP", "")
 const DEFAULT_ORPHEUS_PORT = get(ENV, "SHADES_ORPHEUS_PORT", "")
@@ -59,6 +59,7 @@ mutable struct SpecState
     wl::Union{Nothing,Float64}
     slit::Union{Nothing,Float64}
     shutter::Union{Nothing,Bool}
+    gratting::Union{Nothing,Int8}
 end
 
 _default_ell_preset() = ELLPreset(1, 0, 2, 33.6, 129.8, 10.0, true)
@@ -281,6 +282,10 @@ function SpectrometerDevice(; port::AbstractString=DEFAULT_SOL_PORT, conf_dir::A
             is_open = Bool(value)
             state.shutter = is_open
             Sol.set_shutter(dev, is_open ? 1 : 0)
+        elseif name == :gratting
+            num = Int8(value)
+            state.gratting = num
+            Sol.set_gratting(dev, num)
         end
         return :ok
     end
@@ -291,6 +296,10 @@ function SpectrometerDevice(; port::AbstractString=DEFAULT_SOL_PORT, conf_dir::A
             return Sol.get_slit(dev)
         elseif name == :shutter
             return state.shutter
+        elseif name == :gratting
+            return state.gratting
+        elseif name == :calibr_fun
+            return Sol.get_fun(dev)
         end
         return nothing
     end

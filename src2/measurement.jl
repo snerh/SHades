@@ -7,6 +7,7 @@ using ..Parameters
 using ..DeviceManager
 using ..DatasetIO
 using ..TimeUtils
+import DataFrames as DF
 
 export MeasurementCommand, StartMeasurement, StopMeasurement, ShutdownMeasurement, UpdateMeasurementParams
 export measurement_loop, MeasurementStarted, MeasurementStep, MeasurementDone, MeasurementStopped
@@ -32,8 +33,8 @@ end
 struct MeasurementStep <: SystemEvent
     index::Int
     point::Point
-    raw::Vector{Float64}
-    spectrum::Spectrum
+    cam_df::DF.DataFrame
+    #spectrum::Spectrum
     file_path::Union{Nothing,String}
     reused::Bool
 end
@@ -255,8 +256,8 @@ function _point_wl(p::Dict{Symbol,Any}, fallback::Int)
     return Float64(fallback)
 end
 
-function new_point(p, data)
-    sig = isempty(data) ? NaN : maximum(data) - median(data)
+function new_point(p, df)
+    sig = isempty(df) ? NaN : maximum(df.:cam_int) - median(df.:cam_int)
     t_s = _as_seconds(get(p, :acq_time, get(p, :time_s, 0.1)))
 
     new_p = copy(p)
@@ -277,18 +278,41 @@ function _measurement_step!(
     p = copy(point)
     #_normalize_params!(p)
     ctx.oldp = _apply_new_params!(ctx.oldp, p, manager)
-
+    Log.printlog("Parameters have been applied, constructing filename")
     file_path = output_dir === nothing ? nothing : joinpath(output_dir, "$(stem).dat")
     reused = false
-    data = Float64[]
+    Log.printlog("Filename = ", file_path)
+
+    # read calibration function from Spectrometer or from Context
+    if ctx.oldp[:sol_wl] == p[:sol_wl] && haskey(ctx.oldp,:calibr_fun)
+        Log.printlog("Reading function from context")
+        calibr_fun = ctx.oldp[:calibr_fun]
+    else
+        Log.printlog("Reading function from device")        
+        calibr_fun= try
+            _read_signal(manager, :spec, :calibr_fun)
+        catch
+            (x,y)->y
+        end
+        Log.printlog("Result: ",calibr_fun)
+        Log.printlog("calibr_fun(p[:sol_wl],2): ",calibr_fun(p[:sol_wl],2))
+        p[:calibr_fun] = calibr_fun
+    end
+    Log.printlog(":calibr_fun for 1025 pixel = ",calibr_fun(p[:sol_wl],1025))
 
     if file_path !== nothing && isfile(file_path)
-        (p, data) = DatasetIO.load_raw_file(file_path)
+        (p, df) = DatasetIO.load_raw_file(file_path)
         reused = true
     else
         #delay_s = Float64(get(p, :delay_s, 1.5))
         #delay_s > 0 && sleep(delay_s)
-        data = _acquire_with_back(manager, p, ctx.back)
+        data = _acquire_with_back(manager, p, ctx.back) #№№№№№№№№№№№№№№№№№№№№ Не готово!!!!
+        Log.printlog("Data acquired: ",data)
+        cam_wl = map(x-> calibr_fun(p[:sol_wl], x),range(1,length(data)))
+        Log.printlog("WL list calculated: ",cam_wl)
+        df = DF.DataFrame(cam_wl=cam_wl,cam_int=data)
+        #Log.printlog("Full dataframe: ",df)
+
     end
 
     real_power = try
@@ -297,29 +321,31 @@ function _measurement_step!(
         NaN
     end
 
-    point_payload = new_point(p, data)
+    point_payload = new_point(p, df)
     point_payload[:real_power] = real_power   
     file_path !== nothing && (point_payload[:__file_path] = file_path)
-    sig = point_payload[:sig]
-    wl = point_payload[:wl]
+    #sig = point_payload[:sig]
+    #wl = point_payload[:wl]
 
     if !reused && file_path !== nothing
-        DatasetIO.save_raw_file(file_path, point_payload, data)
+        DatasetIO.save_raw_file(file_path, point_payload, df)
     end
 
-    push!(ctx.wls, wl)
-    push!(ctx.sigs, sig)
+    #push!(ctx.wls, wl)
+    #push!(ctx.sigs, sig)
+    #print("Put event to event_ch")
     put!(
         event_ch,
         MeasurementStep(
             step_index,
             point_payload,
-            copy(data),
-            Spectrum(copy(ctx.wls), copy(ctx.sigs)),
+            copy(df),
+            #Spectrum(copy(ctx.wls), copy(ctx.sigs)),
             file_path,
             reused,
         )
     )
+    #print("Event to event_ch have been put")
 
     return nothing
 end

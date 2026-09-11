@@ -107,21 +107,19 @@ end
 
 function signal_points(state::AppState)
     if !isempty(state.measurement.points)
+        #println("Current points:",state.measurement.points)
         return state.measurement.points
     end
-    if state.measurement.current_spectrum !== nothing
-        n = min(length(state.measurement.current_spectrum.wavelength), length(state.measurement.current_spectrum.signal))
-        return [Dict{Symbol,Any}(:wl => state.measurement.current_spectrum.wavelength[i], :sig => state.measurement.current_spectrum.signal[i]) for i in 1:n]
-    end
-    return Dict{Symbol,Any}[]
+    #println("Alarm! Empty signal_points!")
+    #if state.measurement.current_spectrum !== nothing
+    #    n = min(length(state.measurement.current_spectrum.wavelength), length(state.measurement.current_spectrum.signal))
+    #    return [Dict{Symbol,Any}(:wl => state.measurement.current_spectrum.wavelength[i], :sig => state.measurement.current_spectrum.signal[i]) for i in 1:n]
+    #end
+    return Point[]
 end
 
 function raw_points(state::AppState)
-    pts = Dict{Symbol,Any}[]
-    for i in eachindex(state.measurement.current_raw)
-        push!(pts, Dict{Symbol,Any}(:idx => Float64(i), :value => state.measurement.current_raw[i]))
-    end
-    return pts
+    Dict{Symbol, Any}[Dict(pairs(row)) for row in eachrow(state.measurement.current_cam_df)]
 end
 
 end

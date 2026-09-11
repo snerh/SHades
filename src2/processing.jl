@@ -6,7 +6,7 @@ using ..Domain
 using ..PlotRender: render_signal_plot!
 
 export save_plot_dat, save_plot_png
-export save_spectrum_dat, save_spectrum_png
+#export save_spectrum_dat, save_spectrum_png
 
 @inline function _to_num(v)
     v isa Number && return Float64(v)
@@ -171,6 +171,7 @@ function save_plot_png(
     return out
 end
 
+"""
 function _spec_to_points(spec::Spectrum)
     n = min(length(spec.wavelength), length(spec.signal))
     return [Dict{Symbol,Any}(:wl => spec.wavelength[i], :sig => spec.signal[i]) for i in 1:n]
@@ -185,5 +186,6 @@ function save_spectrum_png(path::AbstractString, spec::Spectrum; width::Int=900,
     pts = _spec_to_points(spec)
     return save_plot_png(path, pts; xaxis=:wl, yaxis=:sig, mode=:line, log_scale=false, width=width, height=height, title=title)
 end
+"""
 
 end

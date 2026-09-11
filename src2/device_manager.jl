@@ -404,6 +404,8 @@ function _mock_common_device()
                 return Float64(get(params, :ang_power, 0.35))
             elseif signal == :wl
                 return Float64(get(params, :wl, 550.0))
+            elseif signal == :calibr_fun
+                return (x,y) -> y
             end
             return rand()
         end,
@@ -461,7 +463,8 @@ function MockCamDevice()
 end
 
 function call_with_timeout(f, timeout; cleanup_timeout=5.0)
-    t = @async try
+    #t = @async try
+    t = Threads.@spawn try
         f()
     catch ex
         ex

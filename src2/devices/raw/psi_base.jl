@@ -9,10 +9,25 @@ const PSI_CCD_UNIT_SEK    = 3
 const PSI_CCD_UNIT_MIN    = 4
 const PSI_CCD_UNIT_HOURS  = 5
 
-const PSI_CMD_ACK_ERROR = 5
-const PSI_CMD_SCAN_START = 301
+# device commands list for callback
+const PSI_CMD_OPEN = 0; # camera starts to work with server
+const PSI_CMD_CLOSE = 1; # server finish working with camera
+const PSI_CMD_ACK_ERROR = 5; # answer on command
+const PSI_CMD_SCAN_START = 301; # start of scan
 
-const DEFAULT_LIBPATH = "C:\\work\\soft\\SHades2.0\\src2\\devices\\raw\\psi_ccd5.dll"
+const PSI_CCD_AMODE_LIMITED = 0; # limited scan of N images
+const PSI_CCD_AMODE_NON_STOP = 1; # non stop scan of N images
+
+# Standart mode CCD
+const PSI_STANDARD_MODE_CCD_PARALLEL = 0; # parallel
+const PSI_STANDARD_MODE_CCD_SERIAL = 1; # serial
+const PSI_STANDARD_MODE_CCD_LOW_DARK = 2; # low dark current (Hamamatsu)
+const PSI_STANDARD_MODE_CCD_LARGE_FULL_WELL = 3; # lage full well (Hamamatsu)
+#const PSI_STANDARD_MODE_CCD_LOW_IRHD_LOW_GAIN = 4; # infrared camera
+#const PSI_STANDARD_MODE_CCD_IRHD_HI_GAIN = 5; # infrared camera
+
+
+const DEFAULT_LIBPATH = joinpath(@__DIR__,"src\\devices\\raw\\psi_ccd5.dll")
 
 struct PSIContext
     libpath::String
@@ -234,9 +249,9 @@ function set_params(dev::PSIDevice, FPGA::Integer=0, sensor::Integer=0; time::Un
     p = view(buf, 18:26)
     copy!(p, spectrum_roi)
 
-    # overwrite frame count
-    frames_buf::Vector{Cushort} = [UInt16(frames),0]
-    frame_start = Int(round((32 + 18*8)/2))
+    # overwrite frame count and scan_mode
+    frames_buf::Vector{Cushort} = [UInt16(frames),0,0,0,PSI_CCD_AMODE_LIMITED]
+    frame_start = Int(0)
     p2 = view(buf, frame_start:frame_start+1)
     copy!(p2, frames_buf)
 

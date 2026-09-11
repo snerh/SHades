@@ -258,4 +258,41 @@ end
 function get_slit(s)
     get_pos(s, 3)
 end
+
+function set_gratting(s, g)
+    wl = get_wl(s)  # read actual wl
+    set_wl(s,0)     # move to 0 nm
+    set_pos(s, 2, g)# swap gratting
+    set_wl(s,wl)    # move back to wl
 end
+
+function get_gratting(s)
+    get_pos(s, 2)
+end
+
+function get_fun(s)
+    gamma0 = 167.01870
+    k = 2.3057434e-5
+    p0 = 1024.9872
+
+    clip1(x) = min(1,max(-1,x))
+    gr = get_gratting(s)
+    if gr == 4 # mirror
+        return (wl_c,px)->px
+    end
+
+    grooves = [1799.8524,599.4298,299.7137,1][gr]
+    d = 10^6/grooves
+    gamma0_rad = gamma0*π/180
+
+    arg(wl_c) = wl_c / (2*d*sin(gamma0_rad/2))
+    θ(wl_c) = gamma0_rad/2 + acos(clip1(arg(wl_c)))
+    gamma(px) = gamma0_rad + atan(k*(px-p0))
+
+    function wl_fun(wl_c, px)
+        d*(sin(θ(wl_c)) + sin(gamma(px)-θ(wl_c)))
+    end
+    wl_fun
+end
+
+end # Sol module

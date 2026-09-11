@@ -1,7 +1,11 @@
 module PlotRender
 
 import Cairo
+import DataFrames as DF
 import Printf
+using Memoize
+
+include("../devices/raw/Log.jl")
 
 using ..Domain
 
@@ -10,6 +14,17 @@ export DEFAULT_AXIS_CHOICES, render_signal_plot!
 const DEFAULT_AXIS_CHOICES = Symbol[
     :wl, :sol_wl, :polarizer, :analyzer, :power, :loop, :real_power, :sig, :time_s,
 ]
+
+"""
+Fields which describe acquisition/file metadata rather than an independent
+scan coordinate. They are never used for automatic series splitting.
+"""
+
+const DEFAULT_SERIES_EXCLUDE = Set{Symbol}([
+    :real_power,
+    :__file_path,
+    :sig
+])
 
 @inline function _to_num(v)
     v isa Number && return Float64(v)
@@ -24,19 +39,223 @@ end
     return _to_num(get(p, axis, NaN))
 end
 
-function _axis_values(points::Vector{Point}, xaxis::Symbol, yaxis::Symbol)
+"""
+Convert Vector{Point} to a DataFrame.
+
+A Point is expected to be Dict{Symbol,Any}. Missing keys are represented by
+`missing`, so heterogeneous Point dictionaries can still be represented by
+one table.
+"""
+function _points_to_dataframe(points::Vector{Point})
+    """
+    isempty(points) && return DF.DataFrame()
+
+    allkeys = Set{Symbol}()
+    for p in points
+        union!(allkeys, keys(p))
+    end
+
+    cols = Dict{Symbol,Vector}()
+    for k in allkeys
+        cols[k] = Any[get(p, k, missing) for p in points]
+    end
+
+    return DF.DataFrame(cols)
+    """
+    if points == []
+        return DF.DataFrame()
+    else
+        try
+            vcat(DF.DataFrame.(points)...,cols=:union)
+            #DF.DataFrame(points)
+        catch
+            @warn "_points_to_dataframe exception, points = " * sprint(print,points)
+            DF.DataFrame()
+        end
+    end
+end
+
+"""
+Return columns which actually vary in the current dataset and therefore can
+represent scan dimensions.
+
+xaxis, yaxis and explicitly excluded fields are never considered.
+"""
+@memoize function _series_columns(
+    df::DF.DataFrame,
+    xaxis::Symbol,
+    yaxis::Symbol;
+    exclude::AbstractSet{Symbol}=DEFAULT_SERIES_EXCLUDE,
+)
+
+    subdf = DF.groupby(df,collect(Set([xaxis])))[1]
+    #println("Before aux subdf = ",subdf)
+    function aux(df, cols, result)
+        #Log.printlog("DF=",df)
+        #Log.printlog("cols=",cols)
+        #Log.printlog("result=",result)
+        if cols == [] || DF.size(df)[1] == 1
+            #Log.printlog("Cols = [] or size ==1. Exit")
+            return result
+        end
+        c = cols[1]
+        if c in exclude
+            #Log.printlog("Excluded col, continue")
+            aux(df, cols[2:end], result)
+        else
+            
+            subdf = DF.groupby(df,c)[1]
+            if  DF.size(subdf)[1] == DF.size(df)[1]
+                #Log.printlog("Equil size, continue. subdf = ", subdf)
+                aux(subdf,cols[2:end],result)
+            else
+                #Log.printlog("continue. subdf = ", subdf,"result=",result)
+                push!(result,c)
+                aux(subdf,cols[2:end],result)
+            end
+        end
+    end
+
+    result = aux(subdf,propertynames(df),Symbol[])
+    #println(result)
+    #Log.printlog("Axis for lines", result)
+    sort!(result)
+    return result
+end
+
+"""
+Create a stable textual representation of a series parameter value.
+"""
+function _series_value_string(v)
+    v === missing && return "missing"
+    v isa AbstractFloat && !isfinite(v) && return string(v)
+    return string(v)
+end
+
+"""
+Generate a label from the values of the columns defining one series.
+"""
+function _series_label(g, series_columns::Vector{Symbol})
+    isempty(series_columns) && return "Current"
+
+    parts = String[]
+    for c in series_columns
+        push!(parts, "$(c)=$(_series_value_string(g[1, c]))")
+    end
+
+    return join(parts, ", ")
+end
+
+"""
+Generate a deterministic color for series number `i`.
+"""
+function _series_color(i::Int, n::Int)
+    t = n <= 1 ? 0.5 : (i - 1) / (n - 1)
+    return _heat_color(t)
+end
+
+"""
+Extract finite x/y vectors from one DataFrame group.
+
+Rows are sorted by xaxis before extraction.
+"""
+function _group_axis_values(
+    g,
+    xaxis::Symbol,
+    yaxis::Symbol,
+)
+    isempty(g) && return Float64[], Float64[]
+
+    sort!(g, xaxis)
+
     xs = Float64[]
     ys = Float64[]
-    sorted = sort(points, lt = ((x,y) -> _point_axis(x, xaxis) < _point_axis(y, xaxis)))
-    for p in sorted
-        x = _point_axis(p, xaxis)
-        y = _point_axis(p, yaxis)
+
+    for row in eachrow(g)
+        x = _to_num(row[xaxis])
+        y = _to_num(row[yaxis])
+
         if isfinite(x) && isfinite(y)
             push!(xs, x)
             push!(ys, y)
         end
     end
+
     return xs, ys
+end
+
+"""
+Build plotting series from a DataFrame.
+
+If `series_by` is `nothing`, all varying columns except the excluded fields
+are used automatically. If `series_by` is supplied, only those columns are
+used for splitting.
+"""
+@memoize function _make_series(
+    df::DF.DataFrame,
+    xaxis::Symbol,
+    yaxis::Symbol;
+    series_by::Union{Nothing,AbstractVector{Symbol}}=nothing,
+    exclude::AbstractSet{Symbol}=DEFAULT_SERIES_EXCLUDE,
+)
+    isempty(df) && return NamedTuple[]
+
+    series_columns = series_by === nothing ?
+        _series_columns(df, xaxis, yaxis; exclude=exclude) :
+        collect(series_by)
+
+    # Do not allow the plot coordinates or explicitly excluded fields to
+    # accidentally become series dimensions.
+    series_columns = [
+        c for c in series_columns
+        if c != xaxis &&
+           c != yaxis &&
+           !(c in exclude) &&
+           c in propertynames(df)
+    ]
+
+    groups = if isempty(series_columns)
+        [df]
+    else
+        collect(DF.groupby(df, series_columns))
+    end
+
+    # GroupBy iteration order is not a useful contract for a legend.
+    # Sort by textual representations to make output deterministic even when
+    # different columns contain different Julia types.
+    sort!(
+        groups;
+        by = g -> join(
+                (
+                _series_value_string(g[1, c])
+                for c in series_columns),
+            ",")
+        )
+
+    result = NamedTuple[]
+
+    for (i, g) in enumerate(groups)
+        xs, ys = _group_axis_values(g, xaxis, yaxis)
+        isempty(xs) && continue
+
+        push!(
+            result,
+            (
+                label = _series_label(g, series_columns),
+                xs = xs,
+                ys = ys,
+                color = _series_color(i, length(groups)),
+            ),
+        )
+    end
+
+    return result
+end
+
+
+function _axis_values(points::Vector{Point}, xaxis::Symbol, yaxis::Symbol)
+    df = _points_to_dataframe(points)
+    return _group_axis_values(df, xaxis, yaxis)
 end
 
 function _axis_triplet_values(points::Vector{Point}, xaxis::Symbol, yaxis::Symbol, zaxis::Symbol)
@@ -53,6 +272,31 @@ function _axis_triplet_values(points::Vector{Point}, xaxis::Symbol, yaxis::Symbo
             push!(zs, z)
         end
     end
+    return xs, ys, zs
+end
+
+function _axis_triplet_values(
+    df::DF.DataFrame,
+    xaxis::Symbol,
+    yaxis::Symbol,
+    zaxis::Symbol,
+)
+    xs = Float64[]
+    ys = Float64[]
+    zs = Float64[]
+
+    for row in eachrow(df)
+        x = _to_num(row[xaxis])
+        y = _to_num(row[yaxis])
+        z = _to_num(row[zaxis])
+
+        if isfinite(x) && isfinite(y) && isfinite(z)
+            push!(xs, x)
+            push!(ys, y)
+            push!(zs, z)
+        end
+    end
+
     return xs, ys, zs
 end
 
@@ -183,7 +427,7 @@ end
 
 function _draw_series_legend!(
     ctx,
-    series::Vector{NamedTuple{(:label, :color),Tuple{String,NTuple{3,Float64}}}},
+    series::Vector{<:NamedTuple},
     w::Float64,
     h::Float64
 )
@@ -207,7 +451,7 @@ end
 
 function _draw_polyline_series!(
     ctx,
-    series::Vector{NamedTuple{(:label, :xs, :ys, :color),Tuple{String,Vector{Float64},Vector{Float64},NTuple{3,Float64}}}},
+    series::Vector{<:NamedTuple},
     w::Float64,
     h::Float64;
     title::String=""
@@ -221,7 +465,7 @@ function _draw_polyline_series!(
         append!(allx, s.xs)
         append!(ally, s.ys)
     end
-    length(allx) < 2 && return
+    length(allx) < 1 && return
 
     xmin, xmax = _nice_limits(allx)
     ymin, ymax = _nice_limits(ally)
@@ -233,23 +477,27 @@ function _draw_polyline_series!(
     tx(x) = left + (x - xmin) / max(xmax - xmin, 1e-12) * pw
     ty(y) = top + ph - (y - ymin) / max(ymax - ymin, 1e-12) * ph
 
-    legend_items = NamedTuple{(:label, :color),Tuple{String,NTuple{3,Float64}}}[]
+    legend_items = NamedTuple[]
     for s in series
+        isempty(s.xs) && continue
+
+        Cairo.set_source_rgb(ctx, s.color...)
+
         if length(s.xs) == 1
-            Cairo.set_source_rgb(ctx, s.color...)
             Cairo.arc(ctx, tx(s.xs[1]), ty(s.ys[1]), 3.0, 0, 2pi)
             Cairo.fill(ctx)
+
             push!(legend_items, (label=s.label, color=s.color))
             continue
-        elseif length(s.xs) < 2
-            continue
         end
-        Cairo.set_source_rgb(ctx, s.color...)
+
         Cairo.set_line_width(ctx, 1.7)
         Cairo.move_to(ctx, tx(s.xs[1]), ty(s.ys[1]))
+
         for i in 2:length(s.xs)
             Cairo.line_to(ctx, tx(s.xs[i]), ty(s.ys[i]))
         end
+
         Cairo.stroke(ctx)
         push!(legend_items, (label=s.label, color=s.color))
     end
@@ -338,7 +586,7 @@ function _draw_heatmap!(ctx, xs::Vector{Float64}, ys::Vector{Float64}, zs::Vecto
     end
 end
 
-function _draw_polar!(ctx, angles_deg::Vector{Float64}, radii::Vector{Float64}, w::Float64, h::Float64; title::String="")
+function _draw_polar!_old(ctx, angles_deg::Vector{Float64}, radii::Vector{Float64}, w::Float64, h::Float64; title::String="")
     Cairo.set_source_rgb(ctx, 1, 1, 1)
     Cairo.rectangle(ctx, 0, 0, w, h)
     Cairo.fill(ctx)
@@ -405,6 +653,151 @@ function _draw_polar!(ctx, angles_deg::Vector{Float64}, radii::Vector{Float64}, 
     Cairo.stroke(ctx)
 end
 
+function _draw_polar!(
+    ctx,
+    series::Vector{<:NamedTuple},
+    w::Float64,
+    h::Float64;
+    title::String="",
+)
+    Cairo.set_source_rgb(ctx, 1, 1, 1)
+    Cairo.rectangle(ctx, 0, 0, w, h)
+    Cairo.fill(ctx)
+
+    if !isempty(title)
+        Cairo.set_source_rgb(ctx, 0.15, 0.15, 0.15)
+        Cairo.move_to(ctx, 12, 18)
+        Cairo.set_font_size(ctx, 12)
+        Cairo.show_text(ctx, title)
+    end
+
+    isempty(series) && return
+
+    finite_r = Float64[]
+
+    for s in series
+        append!(finite_r, filter(isfinite, s.ys))
+    end
+
+    isempty(finite_r) && return
+
+    rmax = maximum(abs, finite_r)
+    rmax = rmax <= 0 ? 1.0 : rmax
+
+    cx = w / 2
+    cy = h / 2 + 8
+    rr = max(min(w, h) / 2 - 28, 10)
+
+    tr(r) = rr * (r / rmax)
+
+    Cairo.set_source_rgb(ctx, 0.78, 0.78, 0.78)
+    Cairo.set_line_width(ctx, 1.0)
+
+    for frac in (0.25, 0.5, 0.75, 1.0)
+        Cairo.arc(ctx, cx, cy, rr * frac, 0, 2pi)
+        Cairo.stroke(ctx)
+    end
+
+    Cairo.move_to(ctx, cx - rr, cy)
+    Cairo.line_to(ctx, cx + rr, cy)
+    Cairo.stroke(ctx)
+
+    Cairo.move_to(ctx, cx, cy - rr)
+    Cairo.line_to(ctx, cx, cy + rr)
+    Cairo.stroke(ctx)
+
+    Cairo.set_source_rgb(ctx, 0.35, 0.35, 0.35)
+    Cairo.set_font_size(ctx, 10)
+
+    for frac in (0.25, 0.5, 0.75, 1.0)
+        rv = frac * rmax
+
+        Cairo.move_to(ctx, cx + rr * frac + 4, cy - 2)
+        Cairo.show_text(ctx, _fmt_tick(rv))
+    end
+
+    for deg in 0:45:315
+        a = deg * pi / 180
+        lx = cx + (rr + 8) * cos(a)
+        ly = cy - (rr + 8) * sin(a)
+
+        Cairo.move_to(ctx, lx - 8, ly + 3)
+        Cairo.show_text(ctx, string(deg))
+    end
+
+    legend_items = NamedTuple[]
+
+    for s in series
+        pts = Tuple{Float64,Float64}[]
+
+        for i in eachindex(s.xs)
+            a = s.xs[i] * pi / 180
+            r = s.ys[i]
+
+            isfinite(r) || continue
+            push!(pts, (a, r))
+        end
+
+        isempty(pts) && continue
+
+        sort!(pts, by=first)
+
+        Cairo.set_source_rgb(ctx, s.color...)
+        Cairo.set_line_width(ctx, 1.7)
+
+        a0, r0 = pts[1]
+
+        if length(pts) == 1
+            Cairo.arc(
+                ctx,
+                cx + tr(r0) * cos(a0),
+                cy - tr(r0) * sin(a0),
+                3.0,
+                0,
+                2pi,
+            )
+            Cairo.fill(ctx)
+        else
+            Cairo.move_to(
+                ctx,
+                cx + tr(r0) * cos(a0),
+                cy - tr(r0) * sin(a0),
+            )
+
+            for i in 2:length(pts)
+                a, r = pts[i]
+
+                Cairo.line_to(
+                    ctx,
+                    cx + tr(r) * cos(a),
+                    cy - tr(r) * sin(a),
+                )
+            end
+
+            Cairo.stroke(ctx)
+        end
+
+        push!(legend_items, (label=s.label, color=s.color))
+    end
+
+    _draw_series_legend!(ctx, legend_items, w, h)
+
+    return nothing
+end
+
+"""
+Main signal plot renderer.
+
+`points` is converted to a DataFrame once per render call.
+
+`series_by` controls how lines are split:
+- `nothing`: automatically use every varying non-axis column except excluded
+  metadata;
+- `[:polarizer, :analyzer]`: split only by these parameters;
+- `Symbol[]`: force one series.
+
+`real_power` and `__file_path` are excluded from automatic grouping by default.
+"""
 function render_signal_plot!(
     ctx,
     w::Float64,
@@ -416,35 +809,176 @@ function render_signal_plot!(
     zaxis::Symbol=:sig,
     log_scale::Bool=false,
     title::String="",
+    series_by::Union{Nothing,AbstractVector{Symbol}}=nothing,
+    series_exclude::AbstractSet{Symbol}=DEFAULT_SERIES_EXCLUDE,
 )
+    df = _points_to_dataframe(points)
+
+    return render_signal_plot!(
+        ctx,
+        w,
+        h,
+        df;
+        xaxis=xaxis,
+        yaxis=yaxis,
+        mode=mode,
+        zaxis=zaxis,
+        log_scale=log_scale,
+        title=title,
+        series_by=series_by,
+        series_exclude=series_exclude,
+    )
+end
+
+"""
+DataFrame-native main signal plot renderer.
+
+This method is preferable when the same dataset is plotted repeatedly:
+the caller can convert Vector{Point} to DataFrame once and reuse it.
+"""
+function render_signal_plot!(
+    ctx,
+    w::Float64,
+    h::Float64,
+    df::DF.DataFrame;
+    xaxis::Symbol=:wl,
+    yaxis::Symbol=:sig,
+    mode::Symbol=:line,
+    zaxis::Symbol=:sig,
+    log_scale::Bool=false,
+    title::String="",
+    series_by::Union{Nothing,AbstractVector{Symbol}}=nothing,
+    series_exclude::AbstractSet{Symbol}=DEFAULT_SERIES_EXCLUDE,
+)
+    if isempty(df)
+        if mode == :polar
+            _draw_polar!(ctx, NamedTuple[], w, h; title=title)
+        else
+            _draw_axes!(ctx, w, h; title=title)
+        end
+        return nothing
+    end
+
+    # Fail early with a useful error instead of producing an obscure
+    # DataFrame indexing error below.
+    for axis in (xaxis, yaxis)
+        if !(axis in propertynames(df))
+            #throw(ArgumentError("Axis column $(axis) is not present in DataFrame"))
+            return nothing
+        end
+    end
+
     if mode == :heatmap
-        xs, ys, zs = _axis_triplet_values(points, xaxis, yaxis, zaxis)
+        if !(zaxis in propertynames(df))
+            #throw(ArgumentError("Z-axis column $(zaxis) is not present in DataFrame"))
+            return nothing
+        end
+
+        xs, ys, zs = _axis_triplet_values(df, xaxis, yaxis, zaxis)
+
         zdraw = _maybe_log10(zs; enabled=log_scale)
-        keep = [isfinite(xs[i]) && isfinite(ys[i]) && isfinite(zdraw[i]) for i in eachindex(xs)]
+
+        keep = [
+            isfinite(xs[i]) &&
+            isfinite(ys[i]) &&
+            isfinite(zdraw[i])
+            for i in eachindex(xs)
+        ]
+
         xs2 = xs[keep]
         ys2 = ys[keep]
         zs2 = zdraw[keep]
+
         tag = log_scale ? "log10($(zaxis))" : string(zaxis)
-        _draw_heatmap!(ctx, xs2, ys2, zs2, w, h; title=isempty(title) ? "heatmap: $(xaxis), $(yaxis), $(tag)" : title)
+
+        _draw_heatmap!(ctx, xs2, ys2, zs2, w, h; 
+                title=isempty(title) ? "heatmap: $(xaxis), $(yaxis), $(tag)" : title,
+        )
+
     elseif mode == :polar
-        xs, ys = _axis_values(points, xaxis, yaxis)
-        rdraw = _maybe_log10(ys; enabled=log_scale)
-        keep = [isfinite(xs[i]) && isfinite(rdraw[i]) for i in eachindex(xs)]
-        x2 = xs[keep]
-        r2 = rdraw[keep]
+        raw_series = _make_series(df, xaxis, yaxis; series_by=series_by, exclude=series_exclude,)
+
+        series = NamedTuple[]
+        for s in raw_series
+            rdraw = _maybe_log10(s.ys; enabled=log_scale)
+
+            keep = [
+                isfinite(s.xs[i]) &&
+                isfinite(rdraw[i])
+                for i in eachindex(s.xs)
+            ]
+
+            xs = s.xs[keep]
+            ys = rdraw[keep]
+
+            isempty(xs) && continue
+
+            push!(
+                series,
+                (
+                    label=s.label,
+                    xs=xs,
+                    ys=ys,
+                    color=s.color,
+                ),
+            )
+        end
+
         rtag = log_scale ? "log10($(yaxis))" : string(yaxis)
-        _draw_polar!(ctx, x2, r2, w, h; title=isempty(title) ? "polar: angle=$(xaxis), r=$(rtag)" : title)
+
+        _draw_polar!(
+            ctx,
+            series,
+            w,
+            h;
+            title=isempty(title) ?
+                "polar: angle=$(xaxis), r=$(rtag)" :
+                title,
+        )
+
     else
-        xs, ys = _axis_values(points, xaxis, yaxis)
-        ydraw = _maybe_log10(ys; enabled=log_scale)
-        keep = [isfinite(xs[i]) && isfinite(ydraw[i]) for i in eachindex(xs)]
-        x2 = xs[keep]
-        y2 = ydraw[keep]
-        series = NamedTuple{(:label, :xs, :ys, :color),Tuple{String,Vector{Float64},Vector{Float64},NTuple{3,Float64}}}[]
-        push!(series, (label="Current", xs=x2, ys=y2, color=(0.03, 0.38, 0.62)))
+        raw_series = _make_series(df, xaxis, yaxis; series_by=series_by, exclude=series_exclude,)
+
+        series = NamedTuple[]
+
+        for s in raw_series
+            ydraw = _maybe_log10(s.ys; enabled=log_scale)
+
+            keep = [
+                isfinite(s.xs[i]) &&
+                isfinite(ydraw[i])
+                for i in eachindex(s.xs)
+            ]
+
+            xs = s.xs[keep]
+            ys = ydraw[keep]
+
+            isempty(xs) && continue
+
+            push!(
+                series,
+                (
+                    label=s.label,
+                    xs=xs,
+                    ys=ys,
+                    color=s.color,
+                ),
+            )
+        end
+
         ytag = log_scale ? "log10($(yaxis))" : string(yaxis)
-        _draw_polyline_series!(ctx, series, w, h; title=isempty(title) ? "signal: $(xaxis) vs $(ytag)" : title)
+
+        _draw_polyline_series!(
+            ctx,
+            series,
+            w,
+            h;
+            title=isempty(title) ?
+                "signal: $(xaxis) vs $(ytag)" :
+                title,
+        )
     end
+
     return nothing
 end
 

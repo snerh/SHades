@@ -390,7 +390,7 @@ end
         @test point2[:acq_time] == "100 ms"
         @test data2 == data
 
-        pts = DatasetIO.import_dir(d, (p, raw) -> Dict{Symbol,Any}(:wl => p[:wl], :sig => maximum(raw) - minimum(raw)))
+        pts = DatasetIO.import_dir(d, (p, df) -> Dict{Symbol,Any}(:wl => p[:wl], :sig => maximum(df.:cam_int) - minimum(df.:cam_int)))
         @test length(pts) == 1
         @test pts[1][:sig] == 2.0
         @test haskey(pts[1], :__file_path)

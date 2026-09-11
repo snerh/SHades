@@ -1,17 +1,18 @@
 module DatasetIO
 
 using JSON
+using DataFrames
+import CSV
 using ..Domain
 
 export save_raw_file, load_raw_file, import_dir
 
-function save_raw_file(path::AbstractString, params::Dict{Symbol,Any}, data::Vector{Float64})
+function save_raw_file(path::AbstractString, params::Dict{Symbol,Any}, df::DataFrame)
     json = JSON.json(params)
+    #println("Writing to file (",path,")")
     open(path, "w") do io
         println(io, "# ", json)
-        for y in data
-            println(io, y)
-        end
+        CSV.write(io, df; header=false, delim=' ', append = true)
     end
     return path
 end
@@ -22,16 +23,15 @@ function load_raw_file(path::AbstractString)
         s = readline(io)
         header = s[2:end]
         point = Dict(JSON.parse(header, dicttype=Dict{Symbol,Any}))
-        for line in eachline(io)
-            s = strip(line)
-            isempty(s) && continue
-            startswith(s, "#") && continue
-            try
-                push!(data, parse(Float64, s))
-            catch
-            end
+
+        df = CSV.read(path, DataFrame; comment="#", header=false, )
+        if ncol(df) == 1
+            rename!(df, [1 => :cam_int])
+        elseif ncol(df) == 2
+            rename!(df, [1 => :cam_wl, 2 => :cam_int])
         end
-        return point, data
+            
+        return point, df
     end
 end
 
@@ -41,8 +41,8 @@ function import_dir(path::AbstractString, point_builder::Function)
     isempty(dat_files) && return Point[]
 
     return map(dat_files) do file
-        point, data = load_raw_file(file)
-        new_p = point_builder(point, data)
+        point, df = load_raw_file(file)
+        new_p = point_builder(point, df)
         new_p[:__file_path] = file
         new_p
     end

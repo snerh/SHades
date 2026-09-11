@@ -2,6 +2,7 @@ module State
 
 using ..Domain
 using ..Parameters
+import DataFrames as DF
 
 export AppState, MeasurementDataState, DeviceRuntimeState, SessionState
 export MeasurementState, PowerState
@@ -31,13 +32,13 @@ end
 mutable struct MeasurementDataState
     raw_params::Vector{Pair{Symbol,String}}
     scan_params::Union{Nothing,ScanAxisSet}
-    current_spectrum::Union{Nothing,Spectrum}
+    #current_spectrum::Union{Nothing,Spectrum}
     points::Vector{Point}
-    current_raw::Vector{Float64}
+    current_cam_df::DF.DataFrame
     last_saved_file::Union{Nothing,String}
 
     function MeasurementDataState()
-        new(Pair{Symbol,String}[], nothing, nothing, Point[], Float64[], nothing)
+        new(Pair{Symbol,String}[], nothing, Point[], DF.DataFrame(), nothing)
     end
 end
 
