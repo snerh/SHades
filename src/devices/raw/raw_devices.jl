@@ -258,7 +258,7 @@ function LaserDevice(
 end
 
 function SpectrometerDevice(; port::AbstractString=DEFAULT_SOL_PORT, conf_dir::AbstractString=DEFAULT_SOL_CONF_DIR, timeout_s::Float64=2.0)
-    state = SpecState(nothing, nothing, nothing)
+    state = SpecState(nothing, nothing, nothing, nothing)
 
     connect_device = () -> begin
         _validate_sol_conf_dir(conf_dir)
@@ -384,7 +384,7 @@ function CameraDevice(
     ip::AbstractString=DEFAULT_PSI_IP,
     timeout_s::Float64=30.0,
     psi_libpath::AbstractString=DEFAULT_PSI_LIBPATH,
-    scan_timeout_s::Float64=timeout_s,
+    scan_timeout_s::Float64=30.0,
     acq_time_s::Float64=0.1,
     frames::Int=1,
     temp_c::Union{Nothing,Float64}=nothing,
@@ -404,6 +404,8 @@ function CameraDevice(
         PSI.set_params(dev, time=_sec_to_psi_time(state.acq_time_s))
         if state.temp_c !== nothing
             PSI.set_temp(dev; temp=Int(round(state.temp_c)))
+        else
+            PSI.set_temp(dev; temp=Int(-10))
         end
         return :ok
     end

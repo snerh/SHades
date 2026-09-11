@@ -344,7 +344,7 @@ function start_gtk_ui!(
     state::AppState,
     ui_channel,
     controller::Controller;
-    title::AbstractString="SHades2.0",
+    title::AbstractString="SHades2.1",
 )
     presets = load_presets!(controller)
     if isempty(presets)

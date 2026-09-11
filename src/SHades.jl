@@ -201,7 +201,7 @@ stop_measurement!(runtime::AppRuntime) = put!(runtime.meas_cmd, StopMeasurement(
 #stop_power_stabilization!(runtime::AppRuntime) = put!(runtime.power_cmd, StopStab())
 #set_target_power!(runtime::AppRuntime, value::Real) = put!(runtime.power_cmd, SetTargetPower(Float64(value)))
 
-start_gtk_ui!(runtime::AppRuntime; config_path::AbstractString="preset.json", title::AbstractString="SHades2.0") =
+start_gtk_ui!(runtime::AppRuntime; config_path::AbstractString="preset.json", title::AbstractString="SHades2.1") =
     GtkUI.start_gtk_ui!(
         runtime.state,
         runtime.ui_cmd,

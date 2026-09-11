@@ -4,7 +4,7 @@ readl:
 - Author: Computer
 - Date: 2023-09-07
 =#
-function readl(s,stop='\n')
+function readl0(s,stop='\n')
     acc = ""
     while true
         ch = read(s,Char)

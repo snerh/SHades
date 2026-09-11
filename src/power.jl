@@ -71,7 +71,7 @@ function _power_step!(event_ch, manager, target)
     return nothing
 end
 
-function _power_worker(event_ch, manager, running, target, shutdown; period_s=0.03)
+function _power_worker(event_ch, manager, running, target, shutdown; period_s=0.02)
     while !shutdown[]
         if running[]
             try

@@ -250,8 +250,12 @@ function set_params(dev::PSIDevice, FPGA::Integer=0, sensor::Integer=0; time::Un
     copy!(p, spectrum_roi)
 
     # overwrite frame count and scan_mode
-    frames_buf::Vector{Cushort} = [UInt16(frames),0,0,0,PSI_CCD_AMODE_LIMITED]
-    frame_start = Int(0)
+    """
+        frame = 1
+        Другие значения сейчас не работают!!!
+    """
+    frames_buf::Vector{Cushort} = [UInt16(frames),0]#,0,0,PSI_CCD_AMODE_LIMITED]
+    frame_start = Int(1)
     p2 = view(buf, frame_start:frame_start+1)
     copy!(p2, frames_buf)
 

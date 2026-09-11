@@ -53,7 +53,7 @@ include("Log.jl")
 const MOT_NUM = [1; 5; 9; 6; 8] # wl tur sl port shutter
 import ..Calibr
 import LibSerialPort as LSP
-include("readl.jl")
+#include("readl.jl")
 
 struct Spec
     s
@@ -80,6 +80,7 @@ end
 
 function open(port = "COM5"; conf_dir = ".")
     s = LSP.open(port, 9600)
+    LSP.sp_flush(s,LSP.SP_BUF_BOTH)
     tmp = Spec(s)
     motors = map(x -> get_motor(tmp, x), MOT_NUM)
     tur_c = Calibr.T([1;2;3;4],[10968; 30964; 50958; 70960])
@@ -272,8 +273,8 @@ end
 
 function get_fun(s)
     gamma0 = 167.01870
-    k = 2.3057434e-5
-    p0 = 1024.9872
+    k = -2.3057434e-5
+    p0 = 1024.0128
 
     clip1(x) = min(1,max(-1,x))
     gr = get_gratting(s)

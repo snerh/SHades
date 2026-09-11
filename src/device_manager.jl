@@ -462,9 +462,10 @@ function MockCamDevice()
     )
 end
 
-function call_with_timeout(f, timeout; cleanup_timeout=5.0)
+function call_with_timeout(f, timeout; cleanup_timeout=15.0)
     #t = @async try
     t = Threads.@spawn try
+        sleep(0.05)
         f()
     catch ex
         ex
