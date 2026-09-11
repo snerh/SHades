@@ -23,7 +23,8 @@ scan coordinate. They are never used for automatic series splitting.
 const DEFAULT_SERIES_EXCLUDE = Set{Symbol}([
     :real_power,
     :__file_path,
-    :sig
+    :sig,
+    :calibr_fun
 ])
 
 @inline function _to_num(v)
@@ -47,32 +48,24 @@ A Point is expected to be Dict{Symbol,Any}. Missing keys are represented by
 one table.
 """
 function _points_to_dataframe(points::Vector{Point})
-    """
-    isempty(points) && return DF.DataFrame()
-
+    if isempty(points)
+        return DF.DataFrame()
+    end
+    
+    # 1. Собираем уникальные ключи со всех точек
     allkeys = Set{Symbol}()
     for p in points
         union!(allkeys, keys(p))
     end
-
-    cols = Dict{Symbol,Vector}()
+    
+    # 2. Инициализируем колонки с нужным типом (избегаем Any, если возможно)
+    cols = Dict{Symbol, Vector}()
     for k in allkeys
-        cols[k] = Any[get(p, k, missing) for p in points]
+        # Заранее выделяем вектор нужной длины
+        cols[k] = [get(p, k, missing) for p in points]
     end
-
+    
     return DF.DataFrame(cols)
-    """
-    if points == []
-        return DF.DataFrame()
-    else
-        try
-            vcat(DF.DataFrame.(points)...,cols=:union)
-            #DF.DataFrame(points)
-        catch
-            @warn "_points_to_dataframe exception, points = " * sprint(print,points)
-            DF.DataFrame()
-        end
-    end
 end
 
 """
@@ -81,13 +74,37 @@ represent scan dimensions.
 
 xaxis, yaxis and explicitly excluded fields are never considered.
 """
-@memoize function _series_columns(
+function _series_columns(
     df::DF.DataFrame,
     xaxis::Symbol,
     yaxis::Symbol;
     exclude::AbstractSet{Symbol}=DEFAULT_SERIES_EXCLUDE,
 )
+    # Предполагаем, что cols берется из имен колонок df
+    cols = propertynames(df) 
+    result = Symbol[]
+    subdf = DF.groupby(df,xaxis)[1]
+    for c in cols
+        c in exclude && continue
+        
+        # Передаем только нужный столбец в groupby, а не весь df
+        gd = DF.groupby(subdf, c)
+        if !isempty(gd)
+            if DF.size(gd[1])[1] != DF.size(subdf)[1]
+                push!(result, c)
+            end 
+        subdf = gd[1]; end
+    end
+    return result
+end
 
+function _series_columns_old(
+    df::DF.DataFrame,
+    xaxis::Symbol,
+    yaxis::Symbol;
+    exclude::AbstractSet{Symbol}=DEFAULT_SERIES_EXCLUDE,
+)
+    
     subdf = DF.groupby(df,collect(Set([xaxis])))[1]
     #println("Before aux subdf = ",subdf)
     function aux(df, cols, result)
@@ -107,11 +124,11 @@ xaxis, yaxis and explicitly excluded fields are never considered.
             subdf = DF.groupby(df,c)[1]
             if  DF.size(subdf)[1] == DF.size(df)[1]
                 #Log.printlog("Equil size, continue. subdf = ", subdf)
-                aux(subdf,cols[2:end],result)
+                aux(subdf, cols[2:end],result)
             else
                 #Log.printlog("continue. subdf = ", subdf,"result=",result)
                 push!(result,c)
-                aux(subdf,cols[2:end],result)
+                aux(subdf, cols[2:end],result)
             end
         end
     end
@@ -164,22 +181,13 @@ function _group_axis_values(
     xaxis::Symbol,
     yaxis::Symbol,
 )
-    isempty(g) && return Float64[], Float64[]
+    subg = DF.dropmissing(g[!,[xaxis,yaxis]],view = true)
+    isempty(subg) && return Float64[], Float64[]
 
-    sort!(g, xaxis)
+    sort!(subg, xaxis)
 
-    xs = Float64[]
-    ys = Float64[]
-
-    for row in eachrow(g)
-        x = _to_num(row[xaxis])
-        y = _to_num(row[yaxis])
-
-        if isfinite(x) && isfinite(y)
-            push!(xs, x)
-            push!(ys, y)
-        end
-    end
+    xs = collect(subg[!,xaxis])
+    ys = collect(subg[!,yaxis])
 
     return xs, ys
 end
@@ -191,7 +199,7 @@ If `series_by` is `nothing`, all varying columns except the excluded fields
 are used automatically. If `series_by` is supplied, only those columns are
 used for splitting.
 """
-@memoize function _make_series(
+function _make_series(
     df::DF.DataFrame,
     xaxis::Symbol,
     yaxis::Symbol;
@@ -300,10 +308,7 @@ function _axis_triplet_values(
     return xs, ys, zs
 end
 
-function _nice_limits(v::Vector{Float64})
-    isempty(v) && return (0.0, 1.0)
-    lo = minimum(v)
-    hi = maximum(v)
+function _nice_limits(lo::Float64, hi::Float64)
     if lo == hi
         d = lo == 0 ? 1.0 : abs(lo) * 0.1
         return (lo - d, hi + d)
@@ -312,16 +317,18 @@ function _nice_limits(v::Vector{Float64})
     return (lo - pad, hi + pad)
 end
 
-function _maybe_log10(v::Vector{Float64}; enabled::Bool=false)
-    !enabled && return copy(v)
-    out = Float64[]
-    for x in v
-        if x > 0
-            push!(out, log10(x))
-        else
-            push!(out, NaN)
-        end
+function _maybe_log10(v::AbstractVector{Float64}; enabled::Bool=false)
+    !enabled && return v
+    # Если включен, заранее выделяем массив точного размера
+    n = length(v)
+    out = Vector{Float64}(undef, n)
+    
+    # Прямой проход без push!
+    @inbounds for i in 1:n
+        x = v[i]
+        out[i] = x > 0 ? log10(x) : NaN
     end
+    
     return out
 end
 
@@ -459,23 +466,29 @@ function _draw_polyline_series!(
     _draw_axes!(ctx, w, h; title=title)
     isempty(series) && return
 
-    allx = Float64[]
-    ally = Float64[]
+    xmin=Inf
+    xmax=-Inf
+    ymin=Inf
+    ymax=-Inf
     for s in series
-        append!(allx, s.xs)
-        append!(ally, s.ys)
+        xmax = max(xmax, maximum(s.xs))
+        xmin = min(xmin, minimum(s.xs))
+        ymax = max(ymax, maximum(s.ys))
+        ymin = min(ymin, minimum(s.ys))
     end
-    length(allx) < 1 && return
 
-    xmin, xmax = _nice_limits(allx)
-    ymin, ymax = _nice_limits(ally)
+    xmin, xmax = _nice_limits(xmin, xmax)
+    ymin, ymax = _nice_limits(ymin, ymax)
     _draw_cartesian_ticks!(ctx, w, h, xmin, xmax, ymin, ymax)
 
     left, top = 40.0, 15.0
     pw = max(w - 55, 1)
     ph = max(h - 40, 1)
-    tx(x) = left + (x - xmin) / max(xmax - xmin, 1e-12) * pw
-    ty(y) = top + ph - (y - ymin) / max(ymax - ymin, 1e-12) * ph
+     # Кэшируем делители, чтобы не делить в цикле
+    x_denom = max(xmax - xmin, 1e-12)
+    y_denom = max(ymax - ymin, 1e-12)
+    #tx(x) = left + (x - xmin) / max(xmax - xmin, 1e-12) * pw
+    #ty(y) = top + ph - (y - ymin) / max(ymax - ymin, 1e-12) * ph
 
     legend_items = NamedTuple[]
     for s in series
@@ -483,19 +496,28 @@ function _draw_polyline_series!(
 
         Cairo.set_source_rgb(ctx, s.color...)
 
-        if length(s.xs) == 1
-            Cairo.arc(ctx, tx(s.xs[1]), ty(s.ys[1]), 3.0, 0, 2pi)
-            Cairo.fill(ctx)
+        xs::Vector{Float64} = s.xs
+        ys::Vector{Float64} = s.ys
 
+        if length(xs) == 1
+            x_val = left + (xs[1] - xmin) / x_denom * pw
+            y_val = top + ph - (ys[1] - ymin) / y_denom * ph
+            Cairo.arc(ctx, x_val, y_val, 3.0, 0, 2pi)
+            Cairo.fill(ctx)
             push!(legend_items, (label=s.label, color=s.color))
             continue
         end
 
         Cairo.set_line_width(ctx, 1.7)
-        Cairo.move_to(ctx, tx(s.xs[1]), ty(s.ys[1]))
+         # Первая точка (инлайн расчет вместо tx/ty)
+        x0 = left + (xs[1] - xmin) / x_denom * pw
+        y0 = top + ph - (ys[1] - ymin) / y_denom * ph
+        Cairo.move_to(ctx, x0, y0)
 
         for i in 2:length(s.xs)
-            Cairo.line_to(ctx, tx(s.xs[i]), ty(s.ys[i]))
+            xi = left + (xs[i] - xmin) / x_denom * pw
+            yi = top + ph - (ys[i] - ymin) / y_denom * ph
+            Cairo.line_to(ctx, xi, yi)
         end
 
         Cairo.stroke(ctx)
@@ -560,16 +582,21 @@ function _draw_heatmap!(ctx, xs::Vector{Float64}, ys::Vector{Float64}, zs::Vecto
     ylo, yhi = yedges[1], yedges[end]
     _draw_cartesian_ticks!(ctx, w, h, xlo, xhi, ylo, yhi)
 
-    zagg = Float64[]
+
+    zmin=Inf
+    zmax=-Inf
     for (s, n) in values(acc)
-        push!(zagg, s / n)
+        zmin = min(zmin,s / n)
+        zmax = min(zmin,s / n)
     end
-    zmin, zmax = _nice_limits(zagg)
+    zmin, zmax = _nice_limits(zmin,zmax)
     zspan = max(zmax - zmin, 1e-12)
 
-    tx(x) = left + (x - xlo) / max(xhi - xlo, 1e-12) * pw
-    ty(y) = top + ph - (y - ylo) / max(yhi - ylo, 1e-12) * ph
+    #tx(x) = left + (x - xlo) / max(xhi - xlo, 1e-12) * pw
+    #ty(y) = top + ph - (y - ylo) / max(yhi - ylo, 1e-12) * ph
 
+    xfact = 1/ max(xhi - xlo, 1e-12) * pw
+    yfact = 1/ max(yhi - ylo, 1e-12) * ph
     for ix in 1:length(xvals), iy in 1:length(yvals)
         k = (xvals[ix], yvals[iy])
         haskey(acc, k) || continue
@@ -577,10 +604,10 @@ function _draw_heatmap!(ctx, xs::Vector{Float64}, ys::Vector{Float64}, zs::Vecto
         z = s / n
         c = _heat_color((z - zmin) / zspan)
         Cairo.set_source_rgb(ctx, c...)
-        x1 = tx(xedges[ix])
-        x2 = tx(xedges[ix + 1])
-        y1 = ty(yedges[iy + 1])
-        y2 = ty(yedges[iy])
+        x1 = left + (xedges[ix] - xlo) * xfact #tx(xedges[ix])
+        x2 = left + (xedges[ix+1] - xlo) * xfact #tx(xedges[ix + 1])
+        y1 = top + ph - (yedges[iy + 1] - ylo) * yfact #ty(yedges[iy + 1])
+        y2 = top + ph - (yedges[iy] - ylo) * yfact #ty(yedges[iy])
         Cairo.rectangle(ctx, min(x1, x2), min(y1, y2), abs(x2 - x1), abs(y2 - y1))
         Cairo.fill(ctx)
     end
