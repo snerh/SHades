@@ -117,7 +117,7 @@ function bel2num(b)
     end
     acc
 end
-function wait2read(s,timeout = 20)
+function wait2read_old(s,timeout = 20)
     LSP.set_read_timeout(s, timeout)
     try
         return readl(s)
@@ -128,6 +128,20 @@ function wait2read(s,timeout = 20)
         end
         rethrow()
     end
+end
+
+function wait2read(s,timeout = 20)
+    start_time = time()
+    while bytesavailable(s) == 0
+        if (time() - start_time) > timeout
+            throw(TimeoutException("Прибор не ответил"))
+        end
+        # КРИТИЧЕСКИ ВАЖНО: отдаем управление планировщику Julia. 
+        # В этот момент другие приборы успеют выполниться!
+        sleep(0.01) 
+    end
+    LSP.set_read_timeout(s, 2) # 2 секунды таймаут уменно на чтение с порта.
+    return return readl(s)
 end
 
 function get_motor(s, n)
