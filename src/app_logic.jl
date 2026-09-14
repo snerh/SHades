@@ -119,7 +119,7 @@ function signal_points(state::AppState)
 end
 
 function raw_points(state::AppState)
-    Dict{Symbol, Any}[Dict(pairs(row)) for row in eachrow(state.measurement.current_cam_df)]
+    state.measurement.current_cam_df
 end
 
 end

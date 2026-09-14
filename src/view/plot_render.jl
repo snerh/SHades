@@ -172,24 +172,27 @@ function _series_color(i::Int, n::Int)
 end
 
 """
-Extract finite x/y vectors from one DataFrame group.
+Extract finite x/y(/z) vectors from one DataFrame group.
 
 Rows are sorted by xaxis before extraction.
 """
 function _group_axis_values(
     g,
-    xaxis::Symbol,
-    yaxis::Symbol,
+    axes::Vector{Symbol}
 )
-    subg = DF.dropmissing(g[!,[xaxis,yaxis]],view = true)
-    isempty(subg) && return Float64[], Float64[]
+    uniq_axes = unique(axes)
+    subg = DF.dropmissing(g[!,uniq_axes],view = true)
+    isempty(subg) && return map(_->Float64[], axes)
 
-    sort!(subg, xaxis)
+    sort!(subg, axes[1])
 
-    xs = collect(subg[!,xaxis])
-    ys = collect(subg[!,yaxis])
+    res = map(axis -> Float64.(collect(subg[!,axis])), axes)
+    return tuple(res...)
+end
 
-    return xs, ys
+function _axis_values(points::Vector{Point}, axes::Vector{Symbol})
+    df = _points_to_dataframe(points)
+    return _group_axis_values(df, axes)
 end
 
 """
@@ -243,7 +246,7 @@ function _make_series(
     result = NamedTuple[]
 
     for (i, g) in enumerate(groups)
-        xs, ys = _group_axis_values(g, xaxis, yaxis)
+        xs, ys = _group_axis_values(g, [xaxis, yaxis])
         isempty(xs) && continue
 
         push!(
@@ -260,53 +263,6 @@ function _make_series(
     return result
 end
 
-
-function _axis_values(points::Vector{Point}, xaxis::Symbol, yaxis::Symbol)
-    df = _points_to_dataframe(points)
-    return _group_axis_values(df, xaxis, yaxis)
-end
-
-function _axis_triplet_values(points::Vector{Point}, xaxis::Symbol, yaxis::Symbol, zaxis::Symbol)
-    xs = Float64[]
-    ys = Float64[]
-    zs = Float64[]
-    for p in points
-        x = _point_axis(p, xaxis)
-        y = _point_axis(p, yaxis)
-        z = _point_axis(p, zaxis)
-        if isfinite(x) && isfinite(y) && isfinite(z)
-            push!(xs, x)
-            push!(ys, y)
-            push!(zs, z)
-        end
-    end
-    return xs, ys, zs
-end
-
-function _axis_triplet_values(
-    df::DF.DataFrame,
-    xaxis::Symbol,
-    yaxis::Symbol,
-    zaxis::Symbol,
-)
-    xs = Float64[]
-    ys = Float64[]
-    zs = Float64[]
-
-    for row in eachrow(df)
-        x = _to_num(row[xaxis])
-        y = _to_num(row[yaxis])
-        z = _to_num(row[zaxis])
-
-        if isfinite(x) && isfinite(y) && isfinite(z)
-            push!(xs, x)
-            push!(ys, y)
-            push!(zs, z)
-        end
-    end
-
-    return xs, ys, zs
-end
 
 function _nice_limits(lo::Float64, hi::Float64)
     if lo == hi
@@ -597,7 +553,7 @@ function _draw_heatmap!(ctx, xs::Vector{Float64}, ys::Vector{Float64}, zs::Vecto
 
     xfact = 1/ max(xhi - xlo, 1e-12) * pw
     yfact = 1/ max(yhi - ylo, 1e-12) * ph
-    for ix in 1:length(xvals), iy in 1:length(yvals)
+    for ix in eachindex(xvals), iy in eachindex(yvals)
         k = (xvals[ix], yvals[iy])
         haskey(acc, k) || continue
         s, n = acc[k]
@@ -613,72 +569,6 @@ function _draw_heatmap!(ctx, xs::Vector{Float64}, ys::Vector{Float64}, zs::Vecto
     end
 end
 
-function _draw_polar!_old(ctx, angles_deg::Vector{Float64}, radii::Vector{Float64}, w::Float64, h::Float64; title::String="")
-    Cairo.set_source_rgb(ctx, 1, 1, 1)
-    Cairo.rectangle(ctx, 0, 0, w, h)
-    Cairo.fill(ctx)
-
-    if !isempty(title)
-        Cairo.set_source_rgb(ctx, 0.15, 0.15, 0.15)
-        Cairo.move_to(ctx, 12, 18)
-        Cairo.set_font_size(ctx, 12)
-        Cairo.show_text(ctx, title)
-    end
-
-    finite_r = filter(isfinite, radii)
-    isempty(finite_r) && return
-    rmax = maximum(abs, finite_r)
-    rmax = rmax <= 0 ? 1.0 : rmax
-
-    cx = w / 2
-    cy = h / 2 + 8
-    rr = max(min(w, h) / 2 - 28, 10)
-    tr(r) = rr * (r / rmax)
-
-    Cairo.set_source_rgb(ctx, 0.78, 0.78, 0.78)
-    Cairo.set_line_width(ctx, 1.0)
-    for frac in (0.25, 0.5, 0.75, 1.0)
-        Cairo.arc(ctx, cx, cy, rr * frac, 0, 2pi)
-        Cairo.stroke(ctx)
-    end
-    Cairo.move_to(ctx, cx - rr, cy); Cairo.line_to(ctx, cx + rr, cy); Cairo.stroke(ctx)
-    Cairo.move_to(ctx, cx, cy - rr); Cairo.line_to(ctx, cx, cy + rr); Cairo.stroke(ctx)
-
-    Cairo.set_source_rgb(ctx, 0.35, 0.35, 0.35)
-    Cairo.set_font_size(ctx, 10)
-    for frac in (0.25, 0.5, 0.75, 1.0)
-        rv = frac * rmax
-        Cairo.move_to(ctx, cx + rr * frac + 4, cy - 2)
-        Cairo.show_text(ctx, _fmt_tick(rv))
-    end
-    for deg in 0:45:315
-        a = deg * pi / 180
-        lx = cx + (rr + 8) * cos(a)
-        ly = cy - (rr + 8) * sin(a)
-        Cairo.move_to(ctx, lx - 8, ly + 3)
-        Cairo.show_text(ctx, string(deg))
-    end
-
-    pts = Tuple{Float64,Float64}[]
-    for i in eachindex(angles_deg)
-        a = angles_deg[i] * pi / 180
-        r = radii[i]
-        isfinite(r) || continue
-        push!(pts, (a, r))
-    end
-    isempty(pts) && return
-    sort!(pts, by=first)
-
-    Cairo.set_source_rgb(ctx, 0.03, 0.38, 0.62)
-    Cairo.set_line_width(ctx, 1.7)
-    a0, r0 = pts[1]
-    Cairo.move_to(ctx, cx + tr(r0) * cos(a0), cy - tr(r0) * sin(a0))
-    for i in 2:length(pts)
-        a, r = pts[i]
-        Cairo.line_to(ctx, cx + tr(r) * cos(a), cy - tr(r) * sin(a))
-    end
-    Cairo.stroke(ctx)
-end
 
 function _draw_polar!(
     ctx,
@@ -700,15 +590,11 @@ function _draw_polar!(
 
     isempty(series) && return
 
-    finite_r = Float64[]
-
+    rmax = 0
     for s in series
-        append!(finite_r, filter(isfinite, s.ys))
+        rmax = max(rmax, maximum(s.ys))
     end
 
-    isempty(finite_r) && return
-
-    rmax = maximum(abs, finite_r)
     rmax = rmax <= 0 ? 1.0 : rmax
 
     cx = w / 2
@@ -720,6 +606,7 @@ function _draw_polar!(
     Cairo.set_source_rgb(ctx, 0.78, 0.78, 0.78)
     Cairo.set_line_width(ctx, 1.0)
 
+    Cairo.move_to(ctx, cx, cy)
     for frac in (0.25, 0.5, 0.75, 1.0)
         Cairo.arc(ctx, cx, cy, rr * frac, 0, 2pi)
         Cairo.stroke(ctx)
@@ -901,7 +788,7 @@ function render_signal_plot!(
             return nothing
         end
 
-        xs, ys, zs = _axis_triplet_values(df, xaxis, yaxis, zaxis)
+        xs, ys, zs = _group_axis_values(df, [xaxis, yaxis, zaxis])
 
         zdraw = _maybe_log10(zs; enabled=log_scale)
 

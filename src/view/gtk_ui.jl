@@ -9,12 +9,21 @@ using ..Processing: save_plot_dat, save_plot_png
 using ..PlotRender: DEFAULT_AXIS_CHOICES, render_signal_plot!
 
 export AxisEntry, GtkApp, start_gtk_ui!, render!, test_gtk
+export UIUpdate, PlotUpdate, UICommand
 
 const _GTK_CSS_PRIORITY_APPLICATION = Cuint(800)
 
 mutable struct AxisEntry
     name::Symbol
     widget::Any
+end
+
+abstract type UICommand end
+
+struct UIUpdate <: UICommand
+end
+
+struct PlotUpdate <: UICommand
 end
 
 mutable struct GtkApp
@@ -253,6 +262,7 @@ function _safe_canvas_ctx(canvas)
     end
 end
 
+"""
 function _render_signal_canvas!(ui::GtkApp, state::AppState)
     canvas = ui.canvas_signal
     ctx = _safe_canvas_ctx(canvas)
@@ -281,6 +291,7 @@ function _render_raw_canvas!(canvas, state::AppState)
     Gtk.draw(canvas)
     return nothing
 end
+"""
 
 function _update_controls_state!(ui::GtkApp, state::AppState)
     running = is_measurement_active(state)
@@ -323,8 +334,18 @@ function render!(ui::GtkApp, state::AppState)
 
     _update_plot_controls!(ui)
     _update_controls_state!(ui, state)
-    _render_signal_canvas!(ui, state)
-    _render_raw_canvas!(ui.canvas_raw, state)
+
+    # 2. ТЯЖЕЛАЯ ЧАСТЬ: Графики обновляем ТОЛЬКО если реально пришли новые данные
+    #if data_changed
+        # reveal НЕ запускает отрисовку мгновенно. 
+        # Он просто ставит флаг "окно устарело". Gtk сам объединит запросы 
+        # и вызовет функции из Шага 1 на главном потоке без лишних аллокаций.
+        #Gtk.reveal(ui.canvas_signal)
+        #Gtk.reveal(ui.canvas_raw)
+    #end
+
+    #_render_signal_canvas!(ui, state)
+    #_render_raw_canvas!(ui.canvas_raw, state)
     return nothing
 end
 
@@ -517,6 +538,29 @@ function start_gtk_ui!(
     )
     _gtk_install_error_css!(win)
 
+    canvas_signal.draw = function(widget)
+        println("Canvas_signal draw function")
+        ctx = Gtk.getgc(widget)
+        w = Float64(Gtk.width(widget))
+        h = Float64(Gtk.height(widget))
+        ps = _plot_settings(ui)
+        points = copy(signal_points(state))
+        render_signal_plot!(
+            ctx, w, h, points;
+            xaxis=ps.xaxis, yaxis=ps.yaxis, zaxis=ps.zaxis, mode=ps.mode, log_scale=ps.log_scale,
+        )
+    end
+
+    canvas_raw.draw = function (widget)
+        ctx = Gtk.getgc(widget)
+        w = Float64(Gtk.width(widget))
+        h = Float64(Gtk.height(widget))
+        render_signal_plot!(
+            ctx, w, h, copy(raw_points(state));
+            xaxis=:cam_wl, yaxis=:cam_int, mode=:line, zaxis=:cam_int, log_scale=false, title="raw camera data",
+        )
+    end
+
     function _update_preset_controls!()
         Gtk.set_gtk_property!(preset_del_btn, :sensitive, !isempty(presets_ref[]))
         return nothing
@@ -620,11 +664,13 @@ function start_gtk_ui!(
         Gtk.signal_connect(widget, "changed") do _
             _update_plot_controls!(ui)
             render!(ui, state)
+            Gtk.draw(canvas_signal)
             return nothing
         end
     end
     Gtk.signal_connect(log_cb, "toggled") do _
         render!(ui, state)
+        Gtk.draw(canvas_signal)
         return nothing
     end
 
@@ -732,6 +778,8 @@ function start_gtk_ui!(
 
     Gtk.signal_connect(win, "destroy") do _
         refresh_alive[] = false
+        Gtk.GAccessor.active(power_btn) && Gtk.set_gtk_property!(power_btn, :active, false)
+        disconnect_devices!(controller)
         Gtk.gtk_main_running[] && Gtk.gtk_quit()
         return nothing
     end
@@ -743,14 +791,22 @@ function start_gtk_ui!(
 
     @async begin
         for _ui_cmd in ui_channel
-            _on_mainloop(() -> render!(ui, state))
+            if _ui_cmd isa UIUpdate
+                println("UIUpdate recieved")
+                Gtk.gtk_main_running[] || continue;
+                _on_mainloop(() -> render!(ui, state))
+            elseif _ui_cmd isa PlotUpdate
+                println("PlotUpdate recieved")
+                _on_mainloop(() -> (Gtk.draw(canvas_signal);
+                    Gtk.draw(canvas_raw)))
+            end
         end
     end
 
     # Fallback refresh loop: keeps plots responsive even if event bursts are sparse.
     @async begin
         while refresh_alive[]
-            sleep(0.2)
+            sleep(0.1)
             Gtk.gtk_main_running[] || continue
             _on_mainloop(() -> render!(ui, state))
         end
@@ -758,6 +814,8 @@ function start_gtk_ui!(
 
     render!(ui, state)
     Gtk.gtk_main()
+    Gtk.reveal(canvas_signal)
+    Gtk.reveal(canvas_raw)
     return ui
 end
 

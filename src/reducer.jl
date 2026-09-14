@@ -6,6 +6,7 @@ using ..Power
 using ..DeviceManager
 using ..AppEvents: SyncRawParams, SetDeviceLifecycle, DirectoryLoaded
 using ..AppLogic: sync_raw_params!
+using ..GtkUI: UIUpdate, PlotUpdate, UICommand
 
 export reduce!
 
@@ -54,6 +55,7 @@ function reduce!(state::AppState, ev)
         state.measurement.current_cam_df = copy(ev.cam_df)
         state.measurement.last_saved_file = ev.file_path
         state.measurement_state = State.Running
+        return PlotUpdate()
         #print("Event exit")
 
     elseif ev isa MeasurementDone
@@ -88,6 +90,7 @@ function reduce!(state::AppState, ev)
             state.power_state = State.ErrorPower
         end
     end
+    return UIUpdate()
 end
 
 end

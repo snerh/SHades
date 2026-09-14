@@ -54,7 +54,7 @@ mutable struct AppRuntime
     meas_cmd::Channel{MeasurementCommand}
     power_cmd::Channel{PowerCommand}
     ui_events::Channel{SystemEvent}
-    ui_cmd::Channel{Nothing}
+    ui_cmd::Channel{UICommand}
     tasks::Vector{Task}
 end
 
@@ -69,7 +69,7 @@ function _start_runtime(devices::Vector{RawDevice}, device_hub::DeviceHub)
     power_events = Channel{SystemEvent}(32)
 
     ui_events = Channel{SystemEvent}(32)
-    ui_cmd = Channel{Nothing}(16)
+    ui_cmd = Channel{UICommand}(16)
 
     name_by_channel = Dict{Channel{DeviceCommand},Symbol}()
     for (name, ch) in device_hub.devices
@@ -103,8 +103,8 @@ function _start_runtime(devices::Vector{RawDevice}, device_hub::DeviceHub)
     t_reducer = @async begin
         for ev in event_bus
             try
-                reduce!(state, ev)
-                _notify_ui!(ui_cmd)
+                cmd = reduce!(state, ev)
+                _notify_ui!(ui_cmd, cmd)
             catch ex
                 @warn "Reducer failed on event" event_type=string(typeof(ev)) exception=(ex, catch_backtrace())
             end
@@ -159,13 +159,13 @@ function _close_if_open!(ch)
     return nothing
 end
 
-function _notify_ui!(ui_cmd::Channel{Nothing})
+function _notify_ui!(ui_cmd::Channel{UICommand}, cmd::UICommand)
     isopen(ui_cmd) || return nothing
 
     # Coalesce repaint signals so reducer never blocks.
     if !isready(ui_cmd)
         try
-            put!(ui_cmd, nothing)
+            put!(ui_cmd, cmd)
         catch ex
             ex isa InvalidStateException || rethrow(ex)
         end
