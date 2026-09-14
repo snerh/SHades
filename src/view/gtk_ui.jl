@@ -699,7 +699,7 @@ function start_gtk_ui!(
     end
 
     Gtk.signal_connect(disconnect_btn, "clicked") do _
-        Gtk.GAccessor.active(power_btn) && Gtk.set_gtk_property!(power_btn, :active, false)
+        put!(controller.power_cmd, controller.mk_stop_power())
         disconnect_devices!(controller)
         return nothing
     end
@@ -794,7 +794,7 @@ function start_gtk_ui!(
             if _ui_cmd isa UIUpdate
                 println("UIUpdate recieved")
                 Gtk.gtk_main_running[] || continue;
-                _on_mainloop(() -> render!(ui, state))
+                _on_mainloop(() -> render!(ui, deepcopy(state)))
             elseif _ui_cmd isa PlotUpdate
                 println("PlotUpdate recieved")
                 _on_mainloop(() -> (Gtk.draw(canvas_signal);
@@ -808,14 +808,12 @@ function start_gtk_ui!(
         while refresh_alive[]
             sleep(0.1)
             Gtk.gtk_main_running[] || continue
-            _on_mainloop(() -> render!(ui, state))
+            _on_mainloop(() -> render!(ui, deepcopy(state)))
         end
     end
 
-    render!(ui, state)
+    render!(ui, deepcopy(state))
     Gtk.gtk_main()
-    Gtk.reveal(canvas_signal)
-    Gtk.reveal(canvas_raw)
     return ui
 end
 
