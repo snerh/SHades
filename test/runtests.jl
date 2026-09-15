@@ -2,20 +2,20 @@ using Test
 
 module SHadesLite
 
-include(joinpath(@__DIR__, "..", "src2", "domain.jl"))
-include(joinpath(@__DIR__, "..", "src2", "parameters.jl"))
-include(joinpath(@__DIR__, "..", "src2", "parameters_parser.jl"))
-include(joinpath(@__DIR__, "..", "src2", "state.jl"))
-include(joinpath(@__DIR__, "..", "src2", "device_manager.jl"))
-include(joinpath(@__DIR__, "..", "src2", "app_events.jl"))
-include(joinpath(@__DIR__, "..", "src2", "time_utils.jl"))
-include(joinpath(@__DIR__, "..", "src2", "dataset_io.jl"))
-include(joinpath(@__DIR__, "..", "src2", "persistence.jl"))
-include(joinpath(@__DIR__, "..", "src2", "app_logic.jl"))
-include(joinpath(@__DIR__, "..", "src2", "measurement.jl"))
-include(joinpath(@__DIR__, "..", "src2", "power.jl"))
-include(joinpath(@__DIR__, "..", "src2", "app_controller.jl"))
-include(joinpath(@__DIR__, "..", "src2", "reducer.jl"))
+include(joinpath(@__DIR__, "..", "src", "domain.jl"))
+include(joinpath(@__DIR__, "..", "src", "parameters.jl"))
+include(joinpath(@__DIR__, "..", "src", "parameters_parser.jl"))
+include(joinpath(@__DIR__, "..", "src", "state.jl"))
+include(joinpath(@__DIR__, "..", "src", "device_manager.jl"))
+include(joinpath(@__DIR__, "..", "src", "app_events.jl"))
+include(joinpath(@__DIR__, "..", "src", "time_utils.jl"))
+include(joinpath(@__DIR__, "..", "src", "dataset_io.jl"))
+include(joinpath(@__DIR__, "..", "src", "persistence.jl"))
+include(joinpath(@__DIR__, "..", "src", "app_logic.jl"))
+include(joinpath(@__DIR__, "..", "src", "measurement.jl"))
+include(joinpath(@__DIR__, "..", "src", "power.jl"))
+include(joinpath(@__DIR__, "..", "src", "app_controller.jl"))
+include(joinpath(@__DIR__, "..", "src", "reducer.jl"))
 
 end
 

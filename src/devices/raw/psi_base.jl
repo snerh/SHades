@@ -27,7 +27,7 @@ const PSI_STANDARD_MODE_CCD_LARGE_FULL_WELL = 3; # lage full well (Hamamatsu)
 #const PSI_STANDARD_MODE_CCD_IRHD_HI_GAIN = 5; # infrared camera
 
 
-const DEFAULT_LIBPATH = joinpath(@__DIR__,"src\\devices\\raw\\psi_ccd5.dll")
+const DEFAULT_LIBPATH = joinpath(@__DIR__,"psi_ccd5.dll")
 
 struct PSIContext
     libpath::String
