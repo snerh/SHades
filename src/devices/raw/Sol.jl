@@ -141,7 +141,7 @@ function wait2read(s,timeout = 20)
         sleep(0.01) 
     end
     LSP.set_read_timeout(s, 2) # 2 секунды таймаут уменно на чтение с порта.
-    return return readl(s)
+    return readl(s)
 end
 
 function get_motor(s, n)

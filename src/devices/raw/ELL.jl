@@ -22,11 +22,21 @@ module ELL
   end
 
   function wait2read2(s, timeout=15; expected_addr=nothing, expected_comm=nothing)
-    deadline = time() + timeout
+    deadline = time() + timeout + 2
 
     while time() < deadline
       try
-        _set_read_timeout_seconds(s, deadline - time())
+        start_time = time()
+        while bytesavailable(s) == 0
+            if (time() - start_time) > timeout
+                throw(TimeoutException("Прибор не ответил"))
+            end
+            # КРИТИЧЕСКИ ВАЖНО: отдаем управление планировщику Julia. 
+            # В этот момент другие приборы успеют выполниться!
+            sleep(0.01) 
+        end
+
+        _set_read_timeout_seconds(s, 2) # 2 секунды таймаут уменно на чтение с порта.
         res = strip(LSP.readline(s))
         length(res) >= 3 || continue
         addr = parse(Int, string(res[1]))
@@ -41,7 +51,7 @@ module ELL
 
         Log.printlog("ELL stale read: ", addr, comm, payload, " expected=", expected_addr, expected_comm)
       catch e
-        if isa(e, LSP.Timeout)
+        if isa(e, LSP.Timeout) || isa(e,TimeoutException)
           break
         end
         Log.printlog("ELL read error: ", sprint(showerror, e))
